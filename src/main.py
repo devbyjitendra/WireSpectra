@@ -4,8 +4,15 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from pcap_reader import PcapReader
+from protocols import EthernetFrame
 
 console = Console()
+
+def format_hex_preview(data, length=16):
+    """Returns a hex representation of the first few bytes."""
+    hex_part = " ".join(f"{b:02x}" for b in data[:length])
+    ascii_part = "".join(chr(b) if 32 <= b <= 126 else "." for b in data[:length])
+    return f"{hex_part:<48} | {ascii_part}"
 
 @click.command()
 @click.argument('filepath', required=False)
@@ -26,17 +33,65 @@ def main(filepath):
         console.print(f"[*] Opening file: [cyan]{filepath}[/cyan]...")
         reader.open(filepath)
         
-        # Display Header Information in a nice table
-        table = Table(title="PCAP Global Header")
-        table.add_column("Field", style="cyan")
-        table.add_column("Value", style="green")
+        # Global Header Table
+        header_table = Table(title="PCAP Global Header", box=None)
+        header_table.add_column("Field", style="cyan")
+        header_table.add_column("Value", style="green")
+        header_table.add_row("Magic Number", hex(reader.magic_number))
+        header_table.add_row("Version", f"{reader.version_major}.{reader.version_minor}")
+        header_table.add_row("Network Type", "Ethernet (1)" if reader.network == 1 else str(reader.network))
+        console.print(header_table)
+
+        # Packet Feed
+        console.print("\n[*] Processing packets...")
         
-        table.add_row("Magic Number", hex(reader.magic_number))
-        table.add_row("Version", f"{reader.version_major}.{reader.version_minor}")
-        table.add_row("Snap Length", str(reader.snaplen))
-        table.add_row("Network Type", "Ethernet (1)" if reader.network == 1 else str(reader.network))
+        packet_table = Table(title="Packet Preview (First 5)", box=None)
+        packet_table.add_column("#", style="dim")
+        packet_table.add_column("Timestamp", style="yellow")
+        packet_table.add_column("Source MAC", style="cyan")
+        packet_table.add_column("Destination MAC", style="cyan")
+        packet_table.add_column("EtherType", style="green")
+        packet_table.add_column("Size", style="green")
+        packet_table.add_column("Hex Preview (First 16 bytes)", style="magenta")
+
+        packet_count = 0
+        total_bytes = 0
         
-        console.print(table)
+        for header, data in reader:
+            packet_count += 1
+            total_bytes += header['length']
+            
+            if packet_count <= 5:
+                src_mac, dst_mac, ethertype_str = "N/A", "N/A", "N/A"
+                try:
+                    eth_frame = EthernetFrame(data)
+                    src_mac = eth_frame.src_mac
+                    dst_mac = eth_frame.dst_mac
+                    ethertype_str = eth_frame.get_ethertype_name()
+                except Exception:
+                    pass
+
+                packet_table.add_row(
+                    str(packet_count),
+                    f"{header['timestamp']:.6f}",
+                    src_mac,
+                    dst_mac,
+                    ethertype_str,
+                    f"{header['length']} B",
+                    format_hex_preview(data)
+                )
+            
+            if packet_count == 5:
+                console.print(packet_table)
+                console.print("    [dim]... processing remaining packets ...[/dim]")
+
+        if packet_count < 5:
+            console.print(packet_table)
+
+        console.print(f"\n[green]✔[/green] Analysis Complete.")
+        console.print(f"    [bold]Total Packets:[/bold] {packet_count}")
+        console.print(f"    [bold]Total Traffic:[/bold] {total_bytes / 1024:.2f} KB")
+        
         reader.close()
         
     except Exception as e:

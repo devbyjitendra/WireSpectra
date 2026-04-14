@@ -47,6 +47,37 @@ class PcapReader:
 
         return True
 
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        """
+        Reads the next packet from the file. 
+        Returns (header_dict, raw_data_bytes).
+        """
+        if not self.file:
+            raise StopIteration
+
+        # PCAP Packet Header is exactly 16 bytes
+        pkt_header = self.file.read(16)
+        if len(pkt_header) < 16:
+            raise StopIteration
+
+        # Unpack Packet Header: 4x uint32
+        # ts_sec, ts_usec, incl_len, orig_len
+        ts_sec, ts_usec, incl_len, orig_len = struct.unpack('<IIII', pkt_header)
+
+        # Read the actual packet data
+        packet_data = self.file.read(incl_len)
+        
+        header_info = {
+            "timestamp": ts_sec + (ts_usec / 1_000_000),
+            "length": incl_len,
+            "original_length": orig_len
+        }
+
+        return header_info, packet_data
+
     def close(self):
         if self.file:
             self.file.close()
