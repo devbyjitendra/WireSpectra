@@ -4,7 +4,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from pcap_reader import PcapReader
-from protocols import EthernetFrame
+from protocols import EthernetFrame, IPv4Packet
 
 console = Console()
 
@@ -48,9 +48,9 @@ def main(filepath):
         packet_table = Table(title="Packet Preview (First 5)", box=None)
         packet_table.add_column("#", style="dim")
         packet_table.add_column("Timestamp", style="yellow")
-        packet_table.add_column("Source MAC", style="cyan")
-        packet_table.add_column("Destination MAC", style="cyan")
-        packet_table.add_column("EtherType", style="green")
+        packet_table.add_column("Source", style="cyan")
+        packet_table.add_column("Destination", style="cyan")
+        packet_table.add_column("Proto/Type", style="green")
         packet_table.add_column("Size", style="green")
         packet_table.add_column("Hex Preview (First 16 bytes)", style="magenta")
 
@@ -62,21 +62,30 @@ def main(filepath):
             total_bytes += header['length']
             
             if packet_count <= 5:
-                src_mac, dst_mac, ethertype_str = "N/A", "N/A", "N/A"
+                src_str, dst_str, proto_str = "N/A", "N/A", "N/A"
                 try:
                     eth_frame = EthernetFrame(data)
-                    src_mac = eth_frame.src_mac
-                    dst_mac = eth_frame.dst_mac
-                    ethertype_str = eth_frame.get_ethertype_name()
+                    src_str = eth_frame.src_mac
+                    dst_str = eth_frame.dst_mac
+                    proto_str = eth_frame.get_ethertype_name()
+                    
+                    if eth_frame.ethertype == 0x0800:  # IPv4
+                        try:
+                            ip_pkt = IPv4Packet(eth_frame.payload)
+                            src_str = ip_pkt.src_ip
+                            dst_str = ip_pkt.dst_ip
+                            proto_str = ip_pkt.get_protocol_name()
+                        except Exception:
+                            pass
                 except Exception:
                     pass
 
                 packet_table.add_row(
                     str(packet_count),
                     f"{header['timestamp']:.6f}",
-                    src_mac,
-                    dst_mac,
-                    ethertype_str,
+                    src_str,
+                    dst_str,
+                    proto_str,
                     f"{header['length']} B",
                     format_hex_preview(data)
                 )

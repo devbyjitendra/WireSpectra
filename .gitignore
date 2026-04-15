@@ -8,3 +8,4 @@ venv/
 *.pcap
 outputs/
 .pytest_cache/
+DEVELOPMENT_LOG.md
