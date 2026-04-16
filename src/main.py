@@ -4,7 +4,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from pcap_reader import PcapReader
-from protocols import EthernetFrame, IPv4Packet
+from protocols import EthernetFrame, IPv4Packet, TCPPacket, UDPPacket
 
 console = Console()
 
@@ -75,6 +75,24 @@ def main(filepath):
                             src_str = ip_pkt.src_ip
                             dst_str = ip_pkt.dst_ip
                             proto_str = ip_pkt.get_protocol_name()
+                            
+                            if ip_pkt.protocol == 6:  # TCP
+                                try:
+                                    tcp_pkt = TCPPacket(ip_pkt.payload)
+                                    src_str = f"{ip_pkt.src_ip}:{tcp_pkt.src_port}"
+                                    dst_str = f"{ip_pkt.dst_ip}:{tcp_pkt.dst_port}"
+                                    flags = tcp_pkt.get_flags_str()
+                                    proto_str = f"TCP [{flags}]" if flags else "TCP"
+                                except Exception:
+                                    pass
+                            elif ip_pkt.protocol == 17:  # UDP
+                                try:
+                                    udp_pkt = UDPPacket(ip_pkt.payload)
+                                    src_str = f"{ip_pkt.src_ip}:{udp_pkt.src_port}"
+                                    dst_str = f"{ip_pkt.dst_ip}:{udp_pkt.dst_port}"
+                                    proto_str = "UDP"
+                                except Exception:
+                                    pass
                         except Exception:
                             pass
                 except Exception:

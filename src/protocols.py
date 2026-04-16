@@ -101,3 +101,73 @@ class IPv4Packet:
         }
         return protocols.get(self.protocol, f"IP-proto-{self.protocol}")
 
+
+class TCPPacket:
+    def __init__(self, raw_data: bytes):
+        """
+        Parses a TCP header.
+        TCP minimum header length is 20 bytes.
+        """
+        if len(raw_data) < 20:
+            raise ValueError("Data too short for TCP packet")
+
+        self.raw_data = raw_data
+        self.src_port = struct.unpack('>H', raw_data[0:2])[0]
+        self.dst_port = struct.unpack('>H', raw_data[2:4])[0]
+        self.seq_num = struct.unpack('>I', raw_data[4:8])[0]
+        self.ack_num = struct.unpack('>I', raw_data[8:12])[0]
+        
+        # Data Offset is high 4 bits of the 12th byte
+        data_offset_byte = raw_data[12]
+        self.data_offset = (data_offset_byte >> 4) * 4 # Header size in bytes
+        
+        if len(raw_data) < self.data_offset:
+            raise ValueError("Data shorter than TCP header size (data offset)")
+
+        # Flags are the lower 6 bits of the 13th byte
+        self.flags_byte = raw_data[13]
+        
+        # Common Flags
+        self.fin = bool(self.flags_byte & 0x01)
+        self.syn = bool(self.flags_byte & 0x02)
+        self.rst = bool(self.flags_byte & 0x04)
+        self.psh = bool(self.flags_byte & 0x08)
+        self.ack = bool(self.flags_byte & 0x10)
+        self.urg = bool(self.flags_byte & 0x20)
+        
+        self.window_size = struct.unpack('>H', raw_data[14:16])[0]
+        self.checksum = struct.unpack('>H', raw_data[16:18])[0]
+        self.urgent_pointer = struct.unpack('>H', raw_data[18:20])[0]
+        
+        self.payload = raw_data[self.data_offset:]
+
+    def get_flags_str(self) -> str:
+        """Returns active flags as a string, e.g., 'SYN, ACK'."""
+        flags = []
+        if self.urg: flags.append("URG")
+        if self.ack: flags.append("ACK")
+        if self.psh: flags.append("PSH")
+        if self.rst: flags.append("RST")
+        if self.syn: flags.append("SYN")
+        if self.fin: flags.append("FIN")
+        return ", ".join(flags)
+
+
+class UDPPacket:
+    def __init__(self, raw_data: bytes):
+        """
+        Parses a UDP header.
+        UDP header length is exactly 8 bytes.
+        """
+        if len(raw_data) < 8:
+            raise ValueError("Data too short for UDP packet")
+
+        self.raw_data = raw_data
+        self.src_port = struct.unpack('>H', raw_data[0:2])[0]
+        self.dst_port = struct.unpack('>H', raw_data[2:4])[0]
+        self.length = struct.unpack('>H', raw_data[4:6])[0]
+        self.checksum = struct.unpack('>H', raw_data[6:8])[0]
+        
+        self.payload = raw_data[8:self.length] if self.length >= 8 else raw_data[8:]
+
+
