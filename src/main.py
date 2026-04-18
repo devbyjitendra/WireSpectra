@@ -5,6 +5,7 @@ from rich.panel import Panel
 from rich.table import Table
 from pcap_reader import PcapReader
 from protocols import EthernetFrame, IPv4Packet, TCPPacket, UDPPacket
+from flow_tracker import FlowTracker
 
 console = Console()
 
@@ -29,6 +30,7 @@ def main(filepath):
         return
 
     reader = PcapReader()
+    tracker = FlowTracker()
     try:
         console.print(f"[*] Opening file: [cyan]{filepath}[/cyan]...")
         reader.open(filepath)
@@ -61,43 +63,64 @@ def main(filepath):
             packet_count += 1
             total_bytes += header['length']
             
-            if packet_count <= 5:
-                src_str, dst_str, proto_str = "N/A", "N/A", "N/A"
-                try:
-                    eth_frame = EthernetFrame(data)
-                    src_str = eth_frame.src_mac
-                    dst_str = eth_frame.dst_mac
-                    proto_str = eth_frame.get_ethertype_name()
-                    
-                    if eth_frame.ethertype == 0x0800:  # IPv4
-                        try:
-                            ip_pkt = IPv4Packet(eth_frame.payload)
-                            src_str = ip_pkt.src_ip
-                            dst_str = ip_pkt.dst_ip
-                            proto_str = ip_pkt.get_protocol_name()
-                            
-                            if ip_pkt.protocol == 6:  # TCP
-                                try:
-                                    tcp_pkt = TCPPacket(ip_pkt.payload)
-                                    src_str = f"{ip_pkt.src_ip}:{tcp_pkt.src_port}"
-                                    dst_str = f"{ip_pkt.dst_ip}:{tcp_pkt.dst_port}"
-                                    flags = tcp_pkt.get_flags_str()
-                                    proto_str = f"TCP [{flags}]" if flags else "TCP"
-                                except Exception:
-                                    pass
-                            elif ip_pkt.protocol == 17:  # UDP
-                                try:
-                                    udp_pkt = UDPPacket(ip_pkt.payload)
-                                    src_str = f"{ip_pkt.src_ip}:{udp_pkt.src_port}"
-                                    dst_str = f"{ip_pkt.dst_ip}:{udp_pkt.dst_port}"
-                                    proto_str = "UDP"
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+            src_str, dst_str, proto_str = "N/A", "N/A", "N/A"
+            try:
+                eth_frame = EthernetFrame(data)
+                src_str = eth_frame.src_mac
+                dst_str = eth_frame.dst_mac
+                proto_str = eth_frame.get_ethertype_name()
+                
+                if eth_frame.ethertype == 0x0800:  # IPv4
+                    try:
+                        ip_pkt = IPv4Packet(eth_frame.payload)
+                        src_ip = ip_pkt.src_ip
+                        dst_ip = ip_pkt.dst_ip
+                        protocol = ip_pkt.protocol
+                        
+                        src_port = 0
+                        dst_port = 0
+                        src_str = src_ip
+                        dst_str = dst_ip
+                        proto_str = ip_pkt.get_protocol_name()
+                        
+                        if ip_pkt.protocol == 6:  # TCP
+                            try:
+                                tcp_pkt = TCPPacket(ip_pkt.payload)
+                                src_port = tcp_pkt.src_port
+                                dst_port = tcp_pkt.dst_port
+                                src_str = f"{src_ip}:{src_port}"
+                                dst_str = f"{dst_ip}:{dst_port}"
+                                flags = tcp_pkt.get_flags_str()
+                                proto_str = f"TCP [{flags}]" if flags else "TCP"
+                            except Exception:
+                                pass
+                        elif ip_pkt.protocol == 17:  # UDP
+                            try:
+                                udp_pkt = UDPPacket(ip_pkt.payload)
+                                src_port = udp_pkt.src_port
+                                dst_port = udp_pkt.dst_port
+                                src_str = f"{src_ip}:{src_port}"
+                                dst_str = f"{dst_ip}:{dst_port}"
+                                proto_str = "UDP"
+                            except Exception:
+                                pass
+                        
+                        # Process connection flow tracking
+                        tracker.process_packet(
+                            src_ip=src_ip,
+                            src_port=src_port,
+                            dst_ip=dst_ip,
+                            dst_port=dst_port,
+                            protocol=protocol,
+                            length=header['length'],
+                            timestamp=header['timestamp']
+                        )
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
+            if packet_count <= 5:
                 packet_table.add_row(
                     str(packet_count),
                     f"{header['timestamp']:.6f}",
@@ -118,6 +141,34 @@ def main(filepath):
         console.print(f"\n[green]✔[/green] Analysis Complete.")
         console.print(f"    [bold]Total Packets:[/bold] {packet_count}")
         console.print(f"    [bold]Total Traffic:[/bold] {total_bytes / 1024:.2f} KB")
+        
+        # Display Flow tracking table
+        if tracker.flows:
+            flow_table = Table(title=f"Active Flows Summary (Total: {len(tracker.flows)})", box=None)
+            flow_table.add_column("Protocol", style="green")
+            flow_table.add_column("Endpoint A", style="cyan")
+            flow_table.add_column("Endpoint B", style="cyan")
+            flow_table.add_column("Packets", style="magenta")
+            flow_table.add_column("Bytes", style="yellow")
+            flow_table.add_column("Duration", style="yellow")
+            
+            # Sort flows by byte count descending, showing top 10
+            sorted_flows = sorted(tracker.flows.values(), key=lambda f: f.byte_count, reverse=True)[:10]
+            for flow in sorted_flows:
+                ip_a, port_a, ip_b, port_b, _ = flow.flow_key
+                endpoint_a = f"{ip_a}:{port_a}" if port_a else ip_a
+                endpoint_b = f"{ip_b}:{port_b}" if port_b else ip_b
+                
+                flow_table.add_row(
+                    flow.protocol_name,
+                    endpoint_a,
+                    endpoint_b,
+                    str(flow.packet_count),
+                    f"{flow.byte_count} B",
+                    f"{flow.duration:.3f} s"
+                )
+            console.print("\n")
+            console.print(flow_table)
         
         reader.close()
         
