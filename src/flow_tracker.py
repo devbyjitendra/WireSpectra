@@ -1,3 +1,5 @@
+from tls_parser import TLSParser
+
 class Flow:
     def __init__(self, flow_key, protocol_name, start_time):
         self.flow_key = flow_key  # canonical 5-tuple (ip_a, port_a, ip_b, port_b, proto)
@@ -6,6 +8,8 @@ class Flow:
         self.last_active = start_time
         self.packet_count = 0
         self.byte_count = 0
+        self.sni = None
+        self.app_name = None
         
         # Track statistics per direction
         self.bytes_a_to_b = 0
@@ -46,7 +50,7 @@ class FlowTracker:
         else:
             return (dst_ip, dst_port, src_ip, src_port, protocol)
 
-    def process_packet(self, src_ip, src_port, dst_ip, dst_port, protocol, length, timestamp):
+    def process_packet(self, src_ip, src_port, dst_ip, dst_port, protocol, length, timestamp, payload=b''):
         """
         Updates flow tracking with a new packet.
         Returns the Flow object.
@@ -72,4 +76,15 @@ class FlowTracker:
 
         flow = self.flows[canonical_key]
         flow.update(direction, length, timestamp)
+
+        # Application Classification (SNI Extraction)
+        if protocol == 6 and not flow.sni and payload:
+            try:
+                hostname = TLSParser.extract_sni(payload)
+                if hostname:
+                    flow.sni = hostname
+                    flow.app_name = "HTTPS"
+            except Exception:
+                pass
+
         return flow

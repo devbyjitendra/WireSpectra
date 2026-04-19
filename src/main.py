@@ -83,6 +83,7 @@ def main(filepath):
                         dst_str = dst_ip
                         proto_str = ip_pkt.get_protocol_name()
                         
+                        tcp_payload = b''
                         if ip_pkt.protocol == 6:  # TCP
                             try:
                                 tcp_pkt = TCPPacket(ip_pkt.payload)
@@ -92,6 +93,7 @@ def main(filepath):
                                 dst_str = f"{dst_ip}:{dst_port}"
                                 flags = tcp_pkt.get_flags_str()
                                 proto_str = f"TCP [{flags}]" if flags else "TCP"
+                                tcp_payload = tcp_pkt.payload
                             except Exception:
                                 pass
                         elif ip_pkt.protocol == 17:  # UDP
@@ -113,7 +115,8 @@ def main(filepath):
                             dst_port=dst_port,
                             protocol=protocol,
                             length=header['length'],
-                            timestamp=header['timestamp']
+                            timestamp=header['timestamp'],
+                            payload=tcp_payload
                         )
                     except Exception:
                         pass
@@ -146,6 +149,7 @@ def main(filepath):
         if tracker.flows:
             flow_table = Table(title=f"Active Flows Summary (Total: {len(tracker.flows)})", box=None)
             flow_table.add_column("Protocol", style="green")
+            flow_table.add_column("Application/SNI", style="magenta")
             flow_table.add_column("Endpoint A", style="cyan")
             flow_table.add_column("Endpoint B", style="cyan")
             flow_table.add_column("Packets", style="magenta")
@@ -159,8 +163,11 @@ def main(filepath):
                 endpoint_a = f"{ip_a}:{port_a}" if port_a else ip_a
                 endpoint_b = f"{ip_b}:{port_b}" if port_b else ip_b
                 
+                app_str = f"{flow.app_name} ({flow.sni})" if flow.sni else "N/A"
+                
                 flow_table.add_row(
                     flow.protocol_name,
+                    app_str,
                     endpoint_a,
                     endpoint_b,
                     str(flow.packet_count),
