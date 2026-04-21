@@ -1,4 +1,5 @@
 from tls_parser import TLSParser
+from http_parser import HTTPParser
 
 class Flow:
     def __init__(self, flow_key, protocol_name, start_time):
@@ -77,13 +78,20 @@ class FlowTracker:
         flow = self.flows[canonical_key]
         flow.update(direction, length, timestamp)
 
-        # Application Classification (SNI Extraction)
+        # Application Classification (SNI/Host Extraction)
         if protocol == 6 and not flow.sni and payload:
             try:
+                # Try TLS SNI first
                 hostname = TLSParser.extract_sni(payload)
                 if hostname:
                     flow.sni = hostname
                     flow.app_name = "HTTPS"
+                else:
+                    # Try HTTP Host next
+                    host = HTTPParser.extract_host(payload)
+                    if host:
+                        flow.sni = host
+                        flow.app_name = "HTTP"
             except Exception:
                 pass
 
