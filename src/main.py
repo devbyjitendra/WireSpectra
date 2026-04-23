@@ -84,6 +84,8 @@ def main(filepath):
                         proto_str = ip_pkt.get_protocol_name()
                         
                         tcp_payload = b''
+                        fin_flag = False
+                        rst_flag = False
                         if ip_pkt.protocol == 6:  # TCP
                             try:
                                 tcp_pkt = TCPPacket(ip_pkt.payload)
@@ -94,6 +96,8 @@ def main(filepath):
                                 flags = tcp_pkt.get_flags_str()
                                 proto_str = f"TCP [{flags}]" if flags else "TCP"
                                 tcp_payload = tcp_pkt.payload
+                                fin_flag = tcp_pkt.fin
+                                rst_flag = tcp_pkt.rst
                             except Exception:
                                 pass
                         elif ip_pkt.protocol == 17:  # UDP
@@ -116,8 +120,14 @@ def main(filepath):
                             protocol=protocol,
                             length=header['length'],
                             timestamp=header['timestamp'],
-                            payload=tcp_payload
+                            payload=tcp_payload,
+                            fin=fin_flag,
+                            rst=rst_flag
                         )
+                        
+                        # Periodically clean up expired flows (every 100 packets)
+                        if packet_count % 100 == 0:
+                            tracker.cleanup_expired_flows(header['timestamp'])
                     except Exception:
                         pass
             except Exception:
@@ -146,8 +156,9 @@ def main(filepath):
         console.print(f"    [bold]Total Traffic:[/bold] {total_bytes / 1024:.2f} KB")
         
         # Display Flow tracking table
-        if tracker.flows:
-            flow_table = Table(title=f"Active Flows Summary (Total: {len(tracker.flows)})", box=None)
+        all_flows = list(tracker.flows.values()) + list(tracker.expired_flows.values())
+        if all_flows:
+            flow_table = Table(title=f"Flows Summary (Total: {len(all_flows)}, Expired: {len(tracker.expired_flows)})", box=None)
             flow_table.add_column("Protocol", style="green")
             flow_table.add_column("Application/SNI", style="magenta")
             flow_table.add_column("Endpoint A", style="cyan")
@@ -155,15 +166,17 @@ def main(filepath):
             flow_table.add_column("Packets", style="magenta")
             flow_table.add_column("Bytes", style="yellow")
             flow_table.add_column("Duration", style="yellow")
+            flow_table.add_column("Status", style="red")
             
             # Sort flows by byte count descending, showing top 10
-            sorted_flows = sorted(tracker.flows.values(), key=lambda f: f.byte_count, reverse=True)[:10]
+            sorted_flows = sorted(all_flows, key=lambda f: f.byte_count, reverse=True)[:10]
             for flow in sorted_flows:
                 ip_a, port_a, ip_b, port_b, _ = flow.flow_key
                 endpoint_a = f"{ip_a}:{port_a}" if port_a else ip_a
                 endpoint_b = f"{ip_b}:{port_b}" if port_b else ip_b
                 
                 app_str = f"{flow.app_name} ({flow.sni})" if flow.sni else "N/A"
+                status_str = "Active" if flow.state == "ACTIVE" else "Closed/Expired"
                 
                 flow_table.add_row(
                     flow.protocol_name,
@@ -172,7 +185,8 @@ def main(filepath):
                     endpoint_b,
                     str(flow.packet_count),
                     f"{flow.byte_count} B",
-                    f"{flow.duration:.3f} s"
+                    f"{flow.duration:.3f} s",
+                    status_str
                 )
             console.print("\n")
             console.print(flow_table)

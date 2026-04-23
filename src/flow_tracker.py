@@ -11,6 +11,9 @@ class Flow:
         self.byte_count = 0
         self.sni = None
         self.app_name = None
+        self.state = "ACTIVE"
+        self.fin_a_to_b = False
+        self.fin_b_to_a = False
         
         # Track statistics per direction
         self.bytes_a_to_b = 0
@@ -30,6 +33,17 @@ class Flow:
             self.bytes_b_to_a += length
             self.packets_b_to_a += 1
 
+    def update_tcp_state(self, direction, fin, rst):
+        if rst:
+            self.state = "CLOSED"
+        elif fin:
+            if direction == 'a_to_b':
+                self.fin_a_to_b = True
+            else:
+                self.fin_b_to_a = True
+            if self.fin_a_to_b and self.fin_b_to_a:
+                self.state = "CLOSED"
+
     @property
     def duration(self):
         return max(0.0, self.last_active - self.start_time)
@@ -38,6 +52,7 @@ class Flow:
 class FlowTracker:
     def __init__(self):
         self.flows = {}  # flow_key -> Flow
+        self.expired_flows = {}  # flow_key -> Flow
 
     @staticmethod
     def get_canonical_key(src_ip, src_port, dst_ip, dst_port, protocol):
@@ -51,7 +66,7 @@ class FlowTracker:
         else:
             return (dst_ip, dst_port, src_ip, src_port, protocol)
 
-    def process_packet(self, src_ip, src_port, dst_ip, dst_port, protocol, length, timestamp, payload=b''):
+    def process_packet(self, src_ip, src_port, dst_ip, dst_port, protocol, length, timestamp, payload=b'', fin=False, rst=False):
         """
         Updates flow tracking with a new packet.
         Returns the Flow object.
@@ -78,6 +93,9 @@ class FlowTracker:
         flow = self.flows[canonical_key]
         flow.update(direction, length, timestamp)
 
+        if protocol == 6:
+            flow.update_tcp_state(direction, fin, rst)
+
         # Application Classification (SNI/Host Extraction)
         if protocol == 6 and not flow.sni and payload:
             try:
@@ -96,3 +114,19 @@ class FlowTracker:
                 pass
 
         return flow
+
+    def cleanup_expired_flows(self, current_time, idle_timeout=30.0, closed_timeout=5.0):
+        """
+        Identifies expired or closed flows and moves them to the expired archive.
+        """
+        expired_keys = []
+        for key, flow in self.flows.items():
+            if flow.state == "CLOSED":
+                if current_time - flow.last_active > closed_timeout:
+                    expired_keys.append(key)
+            elif current_time - flow.last_active > idle_timeout:
+                expired_keys.append(key)
+
+        for key in expired_keys:
+            self.expired_flows[key] = self.flows.pop(key)
+
