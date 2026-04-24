@@ -6,6 +6,7 @@ from rich.table import Table
 from pcap_reader import PcapReader
 from protocols import EthernetFrame, IPv4Packet, TCPPacket, UDPPacket
 from flow_tracker import FlowTracker
+from rules_engine import RulesEngine
 
 console = Console()
 
@@ -17,7 +18,8 @@ def format_hex_preview(data, length=16):
 
 @click.command()
 @click.argument('filepath', required=False)
-def main(filepath):
+@click.option('--rules', type=click.Path(exists=True), help='Path to rules JSON file')
+def main(filepath, rules):
     welcome_message = Panel.fit(
         "[bold blue]WireSpectra DPI Engine[/bold blue]\n"
         "[white]System Initialized[/white]",
@@ -28,6 +30,15 @@ def main(filepath):
     if not filepath:
         console.print("[yellow]Usage: python src/main.py <path_to_pcap>[/yellow]")
         return
+
+    rules_engine = RulesEngine()
+    if rules:
+        try:
+            rules_engine.load_rules_from_file(rules)
+            console.print(f"[*] Loaded {len(rules_engine.rules)} rules from [cyan]{rules}[/cyan]")
+        except Exception as e:
+            console.print(f"[bold red]Error loading rules file:[/bold red] {str(e)}")
+            return
 
     reader = PcapReader()
     tracker = FlowTracker()
@@ -112,7 +123,7 @@ def main(filepath):
                                 pass
                         
                         # Process connection flow tracking
-                        tracker.process_packet(
+                        flow = tracker.process_packet(
                             src_ip=src_ip,
                             src_port=src_port,
                             dst_ip=dst_ip,
@@ -124,6 +135,21 @@ def main(filepath):
                             fin=fin_flag,
                             rst=rst_flag
                         )
+
+                        # Rules Engine Evaluation
+                        if rules:
+                            matched_rule = rules_engine.evaluate_flow(flow)
+                            if matched_rule:
+                                if matched_rule.action == "BLOCK":
+                                    flow.state = "BLOCKED"
+                                # Store matched rule on flow for metadata / printing
+                                flow.matched_rule = matched_rule
+                                
+                                # Add alert prefix to the CLI packet type
+                                if matched_rule.action == "BLOCK":
+                                    proto_str = f"[red]BLOCK ({matched_rule.rule_id})[/red] " + proto_str
+                                else:
+                                    proto_str = f"[yellow]ALERT ({matched_rule.rule_id})[/yellow] " + proto_str
                         
                         # Periodically clean up expired flows (every 100 packets)
                         if packet_count % 100 == 0:
@@ -176,7 +202,14 @@ def main(filepath):
                 endpoint_b = f"{ip_b}:{port_b}" if port_b else ip_b
                 
                 app_str = f"{flow.app_name} ({flow.sni})" if flow.sni else "N/A"
-                status_str = "Active" if flow.state == "ACTIVE" else "Closed/Expired"
+                
+                # Format status with rules action if applicable
+                if flow.state == "BLOCKED":
+                    status_str = f"[red]Blocked ({flow.matched_rule.rule_id})[/red]"
+                elif hasattr(flow, 'matched_rule') and flow.matched_rule and flow.matched_rule.action == "ALERT":
+                    status_str = f"[yellow]Alerted ({flow.matched_rule.rule_id})[/yellow]"
+                else:
+                    status_str = "Active" if flow.state == "ACTIVE" else "Closed/Expired"
                 
                 flow_table.add_row(
                     flow.protocol_name,
