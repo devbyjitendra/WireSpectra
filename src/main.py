@@ -7,6 +7,7 @@ from pcap_reader import PcapReader
 from protocols import EthernetFrame, IPv4Packet, TCPPacket, UDPPacket
 from flow_tracker import FlowTracker
 from rules_engine import RulesEngine
+from pcap_writer import PcapWriter
 
 console = Console()
 
@@ -19,7 +20,8 @@ def format_hex_preview(data, length=16):
 @click.command()
 @click.argument('filepath', required=False)
 @click.option('--rules', type=click.Path(exists=True), help='Path to rules JSON file')
-def main(filepath, rules):
+@click.option('--export-blocked', type=click.Path(), help='Path to export blocked packets as PCAP')
+def main(filepath, rules, export_blocked):
     welcome_message = Panel.fit(
         "[bold blue]WireSpectra DPI Engine[/bold blue]\n"
         "[white]System Initialized[/white]",
@@ -133,7 +135,8 @@ def main(filepath, rules):
                             timestamp=header['timestamp'],
                             payload=tcp_payload,
                             fin=fin_flag,
-                            rst=rst_flag
+                            rst=rst_flag,
+                            raw_data=data
                         )
 
                         # Rules Engine Evaluation
@@ -224,6 +227,31 @@ def main(filepath, rules):
             console.print("\n")
             console.print(flow_table)
         
+        # Export blocked flows if requested
+        if export_blocked:
+            blocked_packets = []
+            for flow in all_flows:
+                if flow.state == "BLOCKED":
+                    blocked_packets.extend(flow.packets_buffer)
+            
+            if blocked_packets:
+                # Sort packets chronologically by timestamp
+                blocked_packets.sort(key=lambda x: x[0])
+                
+                writer = PcapWriter()
+                try:
+                    writer.open(export_blocked, network=reader.network, snaplen=reader.snaplen)
+                    total_bytes_written = 0
+                    for ts, pkt_data, orig_len in blocked_packets:
+                        writer.write_packet(ts, pkt_data, orig_len)
+                        total_bytes_written += len(pkt_data)
+                    writer.close()
+                    console.print(f"\n[green]✔[/green] Exported {len(blocked_packets)} blocked packets ({total_bytes_written / 1024:.2f} KB) to [cyan]{export_blocked}[/cyan]")
+                except Exception as e:
+                    console.print(f"[bold red]Error exporting packets:[/bold red] {str(e)}")
+            else:
+                console.print("\n[*] No blocked packets to export.")
+
         reader.close()
         
     except Exception as e:

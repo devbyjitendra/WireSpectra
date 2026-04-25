@@ -14,6 +14,7 @@ class Flow:
         self.state = "ACTIVE"
         self.fin_a_to_b = False
         self.fin_b_to_a = False
+        self.packets_buffer = []  # list of (timestamp, raw_packet, original_length)
         
         # Track statistics per direction
         self.bytes_a_to_b = 0
@@ -21,7 +22,7 @@ class Flow:
         self.packets_a_to_b = 0
         self.packets_b_to_a = 0
 
-    def update(self, direction, length, timestamp):
+    def update(self, direction, length, timestamp, raw_data=None):
         self.packet_count += 1
         self.byte_count += length
         self.last_active = timestamp
@@ -32,6 +33,9 @@ class Flow:
         else:
             self.bytes_b_to_a += length
             self.packets_b_to_a += 1
+
+        if raw_data is not None:
+            self.packets_buffer.append((timestamp, raw_data, length))
 
     def update_tcp_state(self, direction, fin, rst):
         if rst:
@@ -66,7 +70,7 @@ class FlowTracker:
         else:
             return (dst_ip, dst_port, src_ip, src_port, protocol)
 
-    def process_packet(self, src_ip, src_port, dst_ip, dst_port, protocol, length, timestamp, payload=b'', fin=False, rst=False):
+    def process_packet(self, src_ip, src_port, dst_ip, dst_port, protocol, length, timestamp, payload=b'', fin=False, rst=False, raw_data=None):
         """
         Updates flow tracking with a new packet.
         Returns the Flow object.
@@ -91,7 +95,7 @@ class FlowTracker:
             self.flows[canonical_key] = Flow(canonical_key, protocol_name, timestamp)
 
         flow = self.flows[canonical_key]
-        flow.update(direction, length, timestamp)
+        flow.update(direction, length, timestamp, raw_data)
 
         if protocol == 6:
             flow.update_tcp_state(direction, fin, rst)
