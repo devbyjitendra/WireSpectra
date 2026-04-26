@@ -8,6 +8,7 @@ from protocols import EthernetFrame, IPv4Packet, TCPPacket, UDPPacket
 from flow_tracker import FlowTracker
 from rules_engine import RulesEngine
 from pcap_writer import PcapWriter
+from reporter import CSVReporter, DPIReportGenerator
 
 console = Console()
 
@@ -21,7 +22,9 @@ def format_hex_preview(data, length=16):
 @click.argument('filepath', required=False)
 @click.option('--rules', type=click.Path(exists=True), help='Path to rules JSON file')
 @click.option('--export-blocked', type=click.Path(), help='Path to export blocked packets as PCAP')
-def main(filepath, rules, export_blocked):
+@click.option('--export-csv', type=click.Path(), help='Path to export flow statistics as CSV')
+@click.option('--report', is_flag=True, help='Print advanced traffic and protocol distribution reports')
+def main(filepath, rules, export_blocked, export_csv, report):
     welcome_message = Panel.fit(
         "[bold blue]WireSpectra DPI Engine[/bold blue]\n"
         "[white]System Initialized[/white]",
@@ -71,10 +74,15 @@ def main(filepath, rules, export_blocked):
 
         packet_count = 0
         total_bytes = 0
+        first_packet_ts = None
+        last_packet_ts = None
         
         for header, data in reader:
             packet_count += 1
             total_bytes += header['length']
+            if first_packet_ts is None:
+                first_packet_ts = header['timestamp']
+            last_packet_ts = header['timestamp']
             
             src_str, dst_str, proto_str = "N/A", "N/A", "N/A"
             try:
@@ -251,6 +259,65 @@ def main(filepath, rules, export_blocked):
                     console.print(f"[bold red]Error exporting packets:[/bold red] {str(e)}")
             else:
                 console.print("\n[*] No blocked packets to export.")
+
+        # Export CSV if requested
+        if export_csv and all_flows:
+            try:
+                CSVReporter.export_flows(all_flows, export_csv)
+                console.print(f"\n[green]✔[/green] Flow statistics exported to CSV: [cyan]{export_csv}[/cyan]")
+            except Exception as e:
+                console.print(f"[bold red]Error exporting CSV:[/bold red] {str(e)}")
+
+        # Print advanced report if requested
+        if report and all_flows:
+            duration = (last_packet_ts - first_packet_ts) if (last_packet_ts and first_packet_ts) else 0.0
+            throughput = DPIReportGenerator.generate_throughput_summary(packet_count, total_bytes, duration)
+            dist = DPIReportGenerator.generate_distribution_report(all_flows)
+            
+            report_title = Panel(
+                f"[bold cyan]WireSpectra DPI Advanced Analysis Report[/bold cyan]\n"
+                f"[white]Duration: {duration:.3f} seconds[/white]\n"
+                f"[white]Total Packets: {packet_count} | Total Bytes: {total_bytes} ({total_bytes / 1024:.2f} KB)[/white]\n"
+                f"[white]Avg Throughput: {throughput['avg_pps']:.2f} pps | {throughput['avg_kbps']:.2f} kbps[/white]",
+                border_style="cyan"
+            )
+            console.print("\n")
+            console.print(report_title)
+            
+            # Protocol Distribution Table
+            proto_table = Table(title="Protocol Distribution", box=None)
+            proto_table.add_column("Protocol", style="green")
+            proto_table.add_column("Packets", style="magenta")
+            proto_table.add_column("Packets %", style="cyan")
+            proto_table.add_column("Bytes", style="yellow")
+            proto_table.add_column("Bytes %", style="cyan")
+            for proto, stats in dist["protocols"].items():
+                proto_table.add_row(
+                    proto,
+                    str(stats["packets"]),
+                    f"{stats['packets_pct']:.1f}%",
+                    f"{stats['bytes']} B",
+                    f"{stats['bytes_pct']:.1f}%"
+                )
+            console.print(proto_table)
+            
+            # Application Distribution Table
+            app_table = Table(title="Application/Service Distribution", box=None)
+            app_table.add_column("Application", style="green")
+            app_table.add_column("Packets", style="magenta")
+            app_table.add_column("Packets %", style="cyan")
+            app_table.add_column("Bytes", style="yellow")
+            app_table.add_column("Bytes %", style="cyan")
+            for app, stats in dist["applications"].items():
+                app_table.add_row(
+                    app,
+                    str(stats["packets"]),
+                    f"{stats['packets_pct']:.1f}%",
+                    f"{stats['bytes']} B",
+                    f"{stats['bytes_pct']:.1f}%"
+                )
+            console.print("\n")
+            console.print(app_table)
 
         reader.close()
         
