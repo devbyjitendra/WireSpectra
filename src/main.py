@@ -161,10 +161,12 @@ def main(filepath, rules, export_blocked, export_csv, report):
                                     proto_str = f"[red]BLOCK ({matched_rule.rule_id})[/red] " + proto_str
                                 else:
                                     proto_str = f"[yellow]ALERT ({matched_rule.rule_id})[/yellow] " + proto_str
-                        
-                        # Periodically clean up expired flows (every 100 packets)
+                        # Periodically clean up expired flows and reload rules (every 100 packets)
                         if packet_count % 100 == 0:
                             tracker.cleanup_expired_flows(header['timestamp'])
+                            if rules:
+                                if rules_engine.check_and_reload():
+                                    console.print(f"\n[bold green][*] Rules configuration modified. Hot-reloaded {len(rules_engine.rules)} rules.[/bold green]\n")
                     except Exception:
                         pass
             except Exception:

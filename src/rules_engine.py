@@ -140,6 +140,8 @@ class Rule:
 class RulesEngine:
     def __init__(self):
         self.rules = []
+        self.rules_filepath = None
+        self.last_modified_time = 0.0
 
     def load_rules(self, rules_list):
         """Loads rules from a list of dicts/Rule objects."""
@@ -163,11 +165,35 @@ class RulesEngine:
         """Loads rules from a JSON config file."""
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"Rules file not found: {filepath}")
+        self.rules_filepath = filepath
+        self.last_modified_time = os.path.getmtime(filepath)
         with open(filepath, "r") as f:
             data = json.load(f)
             if not isinstance(data, list):
                 raise ValueError("Rules file must contain a JSON list of rules")
             self.load_rules(data)
+
+    def check_and_reload(self):
+        """
+        Checks if the loaded rules file has been modified and reloads it if so.
+        Returns True if rules were reloaded, False otherwise.
+        """
+        if not self.rules_filepath or not os.path.exists(self.rules_filepath):
+            return False
+        
+        try:
+            current_mtime = os.path.getmtime(self.rules_filepath)
+            if current_mtime > self.last_modified_time:
+                with open(self.rules_filepath, "r") as f:
+                    data = json.load(f)
+                    if not isinstance(data, list):
+                        return False
+                    self.load_rules(data)
+                self.last_modified_time = current_mtime
+                return True
+        except Exception:
+            pass
+        return False
 
     def evaluate_packet(self, src_ip, src_port, dst_ip, dst_port, protocol, domain=None):
         """
