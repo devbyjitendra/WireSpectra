@@ -6,6 +6,10 @@ from rich.table import Table
 from pcap_reader import PcapReader
 from protocols import EthernetFrame, IPv4Packet, TCPPacket, UDPPacket
 from flow_tracker import FlowTracker
+from rules_engine import RulesEngine
+from pcap_writer import PcapWriter
+from reporter import CSVReporter, DPIReportGenerator
+from rule_builder import InteractiveRuleBuilder
 
 console = Console()
 
@@ -17,7 +21,12 @@ def format_hex_preview(data, length=16):
 
 @click.command()
 @click.argument('filepath', required=False)
-def main(filepath):
+@click.option('--rules', type=click.Path(exists=True), help='Path to rules JSON file')
+@click.option('--export-blocked', type=click.Path(), help='Path to export blocked packets as PCAP')
+@click.option('--export-csv', type=click.Path(), help='Path to export flow statistics as CSV')
+@click.option('--report', is_flag=True, help='Print advanced traffic and protocol distribution reports')
+@click.option('--new-rule', is_flag=True, help='Launch interactive rule builder')
+def main(filepath, rules, export_blocked, export_csv, report, new_rule):
     welcome_message = Panel.fit(
         "[bold blue]WireSpectra DPI Engine[/bold blue]\n"
         "[white]System Initialized[/white]",
@@ -25,9 +34,27 @@ def main(filepath):
     )
     console.print(welcome_message)
 
+    if new_rule:
+        try:
+            rules_file = click.prompt("Path to rules JSON file to save to", default="rules.json")
+            rule = InteractiveRuleBuilder.prompt_rule()
+            InteractiveRuleBuilder.save_rule_to_file(rule, rules_file)
+        except Exception as e:
+            console.print(f"[bold red]Error in rule builder:[/bold red] {str(e)}")
+        return
+
     if not filepath:
         console.print("[yellow]Usage: python src/main.py <path_to_pcap>[/yellow]")
         return
+
+    rules_engine = RulesEngine()
+    if rules:
+        try:
+            rules_engine.load_rules_from_file(rules)
+            console.print(f"[*] Loaded {len(rules_engine.rules)} rules from [cyan]{rules}[/cyan]")
+        except Exception as e:
+            console.print(f"[bold red]Error loading rules file:[/bold red] {str(e)}")
+            return
 
     reader = PcapReader()
     tracker = FlowTracker()
@@ -58,10 +85,15 @@ def main(filepath):
 
         packet_count = 0
         total_bytes = 0
+        first_packet_ts = None
+        last_packet_ts = None
         
         for header, data in reader:
             packet_count += 1
             total_bytes += header['length']
+            if first_packet_ts is None:
+                first_packet_ts = header['timestamp']
+            last_packet_ts = header['timestamp']
             
             src_str, dst_str, proto_str = "N/A", "N/A", "N/A"
             try:
@@ -84,6 +116,8 @@ def main(filepath):
                         proto_str = ip_pkt.get_protocol_name()
                         
                         tcp_payload = b''
+                        fin_flag = False
+                        rst_flag = False
                         if ip_pkt.protocol == 6:  # TCP
                             try:
                                 tcp_pkt = TCPPacket(ip_pkt.payload)
@@ -94,6 +128,8 @@ def main(filepath):
                                 flags = tcp_pkt.get_flags_str()
                                 proto_str = f"TCP [{flags}]" if flags else "TCP"
                                 tcp_payload = tcp_pkt.payload
+                                fin_flag = tcp_pkt.fin
+                                rst_flag = tcp_pkt.rst
                             except Exception:
                                 pass
                         elif ip_pkt.protocol == 17:  # UDP
@@ -108,7 +144,7 @@ def main(filepath):
                                 pass
                         
                         # Process connection flow tracking
-                        tracker.process_packet(
+                        flow = tracker.process_packet(
                             src_ip=src_ip,
                             src_port=src_port,
                             dst_ip=dst_ip,
@@ -116,8 +152,32 @@ def main(filepath):
                             protocol=protocol,
                             length=header['length'],
                             timestamp=header['timestamp'],
-                            payload=tcp_payload
+                            payload=tcp_payload,
+                            fin=fin_flag,
+                            rst=rst_flag,
+                            raw_data=data
                         )
+
+                        # Rules Engine Evaluation
+                        if rules:
+                            matched_rule = rules_engine.evaluate_flow(flow)
+                            if matched_rule:
+                                if matched_rule.action == "BLOCK":
+                                    flow.state = "BLOCKED"
+                                # Store matched rule on flow for metadata / printing
+                                flow.matched_rule = matched_rule
+                                
+                                # Add alert prefix to the CLI packet type
+                                if matched_rule.action == "BLOCK":
+                                    proto_str = f"[red]BLOCK ({matched_rule.rule_id})[/red] " + proto_str
+                                else:
+                                    proto_str = f"[yellow]ALERT ({matched_rule.rule_id})[/yellow] " + proto_str
+                        # Periodically clean up expired flows and reload rules (every 100 packets)
+                        if packet_count % 100 == 0:
+                            tracker.cleanup_expired_flows(header['timestamp'])
+                            if rules:
+                                if rules_engine.check_and_reload():
+                                    console.print(f"\n[bold green][*] Rules configuration modified. Hot-reloaded {len(rules_engine.rules)} rules.[/bold green]\n")
                     except Exception:
                         pass
             except Exception:
@@ -146,8 +206,9 @@ def main(filepath):
         console.print(f"    [bold]Total Traffic:[/bold] {total_bytes / 1024:.2f} KB")
         
         # Display Flow tracking table
-        if tracker.flows:
-            flow_table = Table(title=f"Active Flows Summary (Total: {len(tracker.flows)})", box=None)
+        all_flows = list(tracker.flows.values()) + list(tracker.expired_flows.values())
+        if all_flows:
+            flow_table = Table(title=f"Flows Summary (Total: {len(all_flows)}, Expired: {len(tracker.expired_flows)})", box=None)
             flow_table.add_column("Protocol", style="green")
             flow_table.add_column("Application/SNI", style="magenta")
             flow_table.add_column("Endpoint A", style="cyan")
@@ -155,15 +216,24 @@ def main(filepath):
             flow_table.add_column("Packets", style="magenta")
             flow_table.add_column("Bytes", style="yellow")
             flow_table.add_column("Duration", style="yellow")
+            flow_table.add_column("Status", style="red")
             
             # Sort flows by byte count descending, showing top 10
-            sorted_flows = sorted(tracker.flows.values(), key=lambda f: f.byte_count, reverse=True)[:10]
+            sorted_flows = sorted(all_flows, key=lambda f: f.byte_count, reverse=True)[:10]
             for flow in sorted_flows:
                 ip_a, port_a, ip_b, port_b, _ = flow.flow_key
                 endpoint_a = f"{ip_a}:{port_a}" if port_a else ip_a
                 endpoint_b = f"{ip_b}:{port_b}" if port_b else ip_b
                 
                 app_str = f"{flow.app_name} ({flow.sni})" if flow.sni else "N/A"
+                
+                # Format status with rules action if applicable
+                if flow.state == "BLOCKED":
+                    status_str = f"[red]Blocked ({flow.matched_rule.rule_id})[/red]"
+                elif hasattr(flow, 'matched_rule') and flow.matched_rule and flow.matched_rule.action == "ALERT":
+                    status_str = f"[yellow]Alerted ({flow.matched_rule.rule_id})[/yellow]"
+                else:
+                    status_str = "Active" if flow.state == "ACTIVE" else "Closed/Expired"
                 
                 flow_table.add_row(
                     flow.protocol_name,
@@ -172,11 +242,96 @@ def main(filepath):
                     endpoint_b,
                     str(flow.packet_count),
                     f"{flow.byte_count} B",
-                    f"{flow.duration:.3f} s"
+                    f"{flow.duration:.3f} s",
+                    status_str
                 )
             console.print("\n")
             console.print(flow_table)
         
+        # Export blocked flows if requested
+        if export_blocked:
+            blocked_packets = []
+            for flow in all_flows:
+                if flow.state == "BLOCKED":
+                    blocked_packets.extend(flow.packets_buffer)
+            
+            if blocked_packets:
+                # Sort packets chronologically by timestamp
+                blocked_packets.sort(key=lambda x: x[0])
+                
+                writer = PcapWriter()
+                try:
+                    writer.open(export_blocked, network=reader.network, snaplen=reader.snaplen)
+                    total_bytes_written = 0
+                    for ts, pkt_data, orig_len in blocked_packets:
+                        writer.write_packet(ts, pkt_data, orig_len)
+                        total_bytes_written += len(pkt_data)
+                    writer.close()
+                    console.print(f"\n[green]✔[/green] Exported {len(blocked_packets)} blocked packets ({total_bytes_written / 1024:.2f} KB) to [cyan]{export_blocked}[/cyan]")
+                except Exception as e:
+                    console.print(f"[bold red]Error exporting packets:[/bold red] {str(e)}")
+            else:
+                console.print("\n[*] No blocked packets to export.")
+
+        # Export CSV if requested
+        if export_csv and all_flows:
+            try:
+                CSVReporter.export_flows(all_flows, export_csv)
+                console.print(f"\n[green]✔[/green] Flow statistics exported to CSV: [cyan]{export_csv}[/cyan]")
+            except Exception as e:
+                console.print(f"[bold red]Error exporting CSV:[/bold red] {str(e)}")
+
+        # Print advanced report if requested
+        if report and all_flows:
+            duration = (last_packet_ts - first_packet_ts) if (last_packet_ts and first_packet_ts) else 0.0
+            throughput = DPIReportGenerator.generate_throughput_summary(packet_count, total_bytes, duration)
+            dist = DPIReportGenerator.generate_distribution_report(all_flows)
+            
+            report_title = Panel(
+                f"[bold cyan]WireSpectra DPI Advanced Analysis Report[/bold cyan]\n"
+                f"[white]Duration: {duration:.3f} seconds[/white]\n"
+                f"[white]Total Packets: {packet_count} | Total Bytes: {total_bytes} ({total_bytes / 1024:.2f} KB)[/white]\n"
+                f"[white]Avg Throughput: {throughput['avg_pps']:.2f} pps | {throughput['avg_kbps']:.2f} kbps[/white]",
+                border_style="cyan"
+            )
+            console.print("\n")
+            console.print(report_title)
+            
+            # Protocol Distribution Table
+            proto_table = Table(title="Protocol Distribution", box=None)
+            proto_table.add_column("Protocol", style="green")
+            proto_table.add_column("Packets", style="magenta")
+            proto_table.add_column("Packets %", style="cyan")
+            proto_table.add_column("Bytes", style="yellow")
+            proto_table.add_column("Bytes %", style="cyan")
+            for proto, stats in dist["protocols"].items():
+                proto_table.add_row(
+                    proto,
+                    str(stats["packets"]),
+                    f"{stats['packets_pct']:.1f}%",
+                    f"{stats['bytes']} B",
+                    f"{stats['bytes_pct']:.1f}%"
+                )
+            console.print(proto_table)
+            
+            # Application Distribution Table
+            app_table = Table(title="Application/Service Distribution", box=None)
+            app_table.add_column("Application", style="green")
+            app_table.add_column("Packets", style="magenta")
+            app_table.add_column("Packets %", style="cyan")
+            app_table.add_column("Bytes", style="yellow")
+            app_table.add_column("Bytes %", style="cyan")
+            for app, stats in dist["applications"].items():
+                app_table.add_row(
+                    app,
+                    str(stats["packets"]),
+                    f"{stats['packets_pct']:.1f}%",
+                    f"{stats['bytes']} B",
+                    f"{stats['bytes_pct']:.1f}%"
+                )
+            console.print("\n")
+            console.print(app_table)
+
         reader.close()
         
     except Exception as e:
