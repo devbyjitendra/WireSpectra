@@ -9,6 +9,7 @@ from flow_tracker import FlowTracker
 from rules_engine import RulesEngine
 from pcap_writer import PcapWriter
 from reporter import CSVReporter, DPIReportGenerator
+from rule_builder import InteractiveRuleBuilder
 
 console = Console()
 
@@ -24,13 +25,23 @@ def format_hex_preview(data, length=16):
 @click.option('--export-blocked', type=click.Path(), help='Path to export blocked packets as PCAP')
 @click.option('--export-csv', type=click.Path(), help='Path to export flow statistics as CSV')
 @click.option('--report', is_flag=True, help='Print advanced traffic and protocol distribution reports')
-def main(filepath, rules, export_blocked, export_csv, report):
+@click.option('--new-rule', is_flag=True, help='Launch interactive rule builder')
+def main(filepath, rules, export_blocked, export_csv, report, new_rule):
     welcome_message = Panel.fit(
         "[bold blue]WireSpectra DPI Engine[/bold blue]\n"
         "[white]System Initialized[/white]",
         border_style="bright_magenta"
     )
     console.print(welcome_message)
+
+    if new_rule:
+        try:
+            rules_file = click.prompt("Path to rules JSON file to save to", default="rules.json")
+            rule = InteractiveRuleBuilder.prompt_rule()
+            InteractiveRuleBuilder.save_rule_to_file(rule, rules_file)
+        except Exception as e:
+            console.print(f"[bold red]Error in rule builder:[/bold red] {str(e)}")
+        return
 
     if not filepath:
         console.print("[yellow]Usage: python src/main.py <path_to_pcap>[/yellow]")
