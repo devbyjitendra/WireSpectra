@@ -1,6 +1,9 @@
 import ipaddress
 import json
 import os
+from logger import get_logger
+
+logger = get_logger("RulesEngine")
 
 class Rule:
     def __init__(self, rule_id, action, protocol=None, src_ip=None, dst_ip=None, src_port=None, dst_port=None, domain=None):
@@ -164,14 +167,17 @@ class RulesEngine:
     def load_rules_from_file(self, filepath):
         """Loads rules from a JSON config file."""
         if not os.path.exists(filepath):
+            logger.error(f"Rules file not found: {filepath}")
             raise FileNotFoundError(f"Rules file not found: {filepath}")
         self.rules_filepath = filepath
         self.last_modified_time = os.path.getmtime(filepath)
         with open(filepath, "r") as f:
             data = json.load(f)
             if not isinstance(data, list):
+                logger.error(f"Invalid rules format in {filepath}: not a list")
                 raise ValueError("Rules file must contain a JSON list of rules")
             self.load_rules(data)
+            logger.info(f"Loaded {len(self.rules)} rules from {filepath}")
 
     def check_and_reload(self):
         """
@@ -184,15 +190,18 @@ class RulesEngine:
         try:
             current_mtime = os.path.getmtime(self.rules_filepath)
             if current_mtime > self.last_modified_time:
+                logger.info(f"Rules file {self.rules_filepath} modification detected. Reloading...")
                 with open(self.rules_filepath, "r") as f:
                     data = json.load(f)
                     if not isinstance(data, list):
+                        logger.error("Failed to hot-reload: config format not a list")
                         return False
                     self.load_rules(data)
                 self.last_modified_time = current_mtime
+                logger.info(f"Hot-reloaded {len(self.rules)} rules successfully")
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Exception during rules hot-reload: {str(e)}")
         return False
 
     def evaluate_packet(self, src_ip, src_port, dst_ip, dst_port, protocol, domain=None):
@@ -200,8 +209,10 @@ class RulesEngine:
         Evaluates details of a packet/flow.
         Returns the first matching Rule, or None.
         """
+        logger.debug(f"Evaluating packet: {src_ip}:{src_port} <-> {dst_ip}:{dst_port} | Proto={protocol} | Domain={domain}")
         for rule in self.rules:
             if rule.matches(src_ip, src_port, dst_ip, dst_port, protocol, domain):
+                logger.info(f"Rule match: rule_id={rule.rule_id}, action={rule.action} for {src_ip}:{src_port} <-> {dst_ip}:{dst_port}")
                 return rule
         return None
 

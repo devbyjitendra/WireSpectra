@@ -1,5 +1,8 @@
 from tls_parser import TLSParser
 from http_parser import HTTPParser
+from logger import get_logger
+
+logger = get_logger("FlowTracker")
 
 class Flow:
     def __init__(self, flow_key, protocol_name, start_time):
@@ -92,13 +95,17 @@ class FlowTracker:
             direction = 'b_to_a'
 
         if canonical_key not in self.flows:
+            logger.info(f"New flow detected: {canonical_key[0]}:{canonical_key[1]} <-> {canonical_key[2]}:{canonical_key[3]} | Proto={protocol_name}")
             self.flows[canonical_key] = Flow(canonical_key, protocol_name, timestamp)
 
         flow = self.flows[canonical_key]
         flow.update(direction, length, timestamp, raw_data)
 
         if protocol == 6:
+            prev_state = flow.state
             flow.update_tcp_state(direction, fin, rst)
+            if flow.state != prev_state:
+                logger.info(f"Flow state transition: {canonical_key[0]}:{canonical_key[1]} <-> {canonical_key[2]}:{canonical_key[3]} state={flow.state}")
 
         # Application Classification (SNI/Host Extraction)
         if protocol == 6 and not flow.sni and payload:
@@ -108,14 +115,16 @@ class FlowTracker:
                 if hostname:
                     flow.sni = hostname
                     flow.app_name = "HTTPS"
+                    logger.info(f"Flow classified: {canonical_key[0]}:{canonical_key[1]} <-> {canonical_key[2]}:{canonical_key[3]} | App=HTTPS | SNI={hostname}")
                 else:
                     # Try HTTP Host next
                     host = HTTPParser.extract_host(payload)
                     if host:
                         flow.sni = host
                         flow.app_name = "HTTP"
-            except Exception:
-                pass
+                        logger.info(f"Flow classified: {canonical_key[0]}:{canonical_key[1]} <-> {canonical_key[2]}:{canonical_key[3]} | App=HTTP | Host={host}")
+            except Exception as e:
+                logger.warning(f"Error classifying application payload: {str(e)}")
 
         return flow
 
@@ -128,8 +137,10 @@ class FlowTracker:
             if flow.state == "CLOSED":
                 if current_time - flow.last_active > closed_timeout:
                     expired_keys.append(key)
+                    logger.info(f"Flow expired (TCP closed timeout): {key[0]}:{key[1]} <-> {key[2]}:{key[3]}")
             elif current_time - flow.last_active > idle_timeout:
                 expired_keys.append(key)
+                logger.info(f"Flow expired (idle timeout): {key[0]}:{key[1]} <-> {key[2]}:{key[3]}")
 
         for key in expired_keys:
             self.expired_flows[key] = self.flows.pop(key)

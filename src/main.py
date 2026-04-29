@@ -10,8 +10,10 @@ from rules_engine import RulesEngine
 from pcap_writer import PcapWriter
 from reporter import CSVReporter, DPIReportGenerator
 from rule_builder import InteractiveRuleBuilder
+from logger import setup_logger, get_logger
 
 console = Console()
+logger = get_logger("CLI")
 
 def format_hex_preview(data, length=16):
     """Returns a hex representation of the first few bytes."""
@@ -26,7 +28,12 @@ def format_hex_preview(data, length=16):
 @click.option('--export-csv', type=click.Path(), help='Path to export flow statistics as CSV')
 @click.option('--report', is_flag=True, help='Print advanced traffic and protocol distribution reports')
 @click.option('--new-rule', is_flag=True, help='Launch interactive rule builder')
-def main(filepath, rules, export_blocked, export_csv, report, new_rule):
+@click.option('--log-level', type=click.Choice(['DEBUG', 'INFO', 'WARNING', 'ERROR'], case_sensitive=False), default='WARNING', help='Set logging verbosity level')
+@click.option('--log-file', type=click.Path(), default='dpi_engine.log', help='Path to output log file')
+def main(filepath, rules, export_blocked, export_csv, report, new_rule, log_level, log_file):
+    setup_logger(log_level, log_file)
+    logger.info("WireSpectra DPI Engine starting up...")
+
     welcome_message = Panel.fit(
         "[bold blue]WireSpectra DPI Engine[/bold blue]\n"
         "[white]System Initialized[/white]",
@@ -53,12 +60,14 @@ def main(filepath, rules, export_blocked, export_csv, report, new_rule):
             rules_engine.load_rules_from_file(rules)
             console.print(f"[*] Loaded {len(rules_engine.rules)} rules from [cyan]{rules}[/cyan]")
         except Exception as e:
+            logger.error(f"Failed to load rules file: {str(e)}")
             console.print(f"[bold red]Error loading rules file:[/bold red] {str(e)}")
             return
 
     reader = PcapReader()
     tracker = FlowTracker()
     try:
+        logger.info(f"Opening PCAP file: {filepath}")
         console.print(f"[*] Opening file: [cyan]{filepath}[/cyan]...")
         reader.open(filepath)
         
@@ -267,18 +276,23 @@ def main(filepath, rules, export_blocked, export_csv, report, new_rule):
                         writer.write_packet(ts, pkt_data, orig_len)
                         total_bytes_written += len(pkt_data)
                     writer.close()
+                    logger.info(f"Successfully exported {len(blocked_packets)} blocked packets ({total_bytes_written} bytes) to {export_blocked}")
                     console.print(f"\n[green]✔[/green] Exported {len(blocked_packets)} blocked packets ({total_bytes_written / 1024:.2f} KB) to [cyan]{export_blocked}[/cyan]")
                 except Exception as e:
+                    logger.error(f"Error exporting packets: {str(e)}")
                     console.print(f"[bold red]Error exporting packets:[/bold red] {str(e)}")
             else:
+                logger.info("No blocked packets found to export.")
                 console.print("\n[*] No blocked packets to export.")
 
         # Export CSV if requested
         if export_csv and all_flows:
             try:
                 CSVReporter.export_flows(all_flows, export_csv)
+                logger.info(f"Successfully exported flow statistics to {export_csv}")
                 console.print(f"\n[green]✔[/green] Flow statistics exported to CSV: [cyan]{export_csv}[/cyan]")
             except Exception as e:
+                logger.error(f"Error exporting CSV: {str(e)}")
                 console.print(f"[bold red]Error exporting CSV:[/bold red] {str(e)}")
 
         # Print advanced report if requested
@@ -332,9 +346,11 @@ def main(filepath, rules, export_blocked, export_csv, report, new_rule):
             console.print("\n")
             console.print(app_table)
 
+        logger.info("WireSpectra DPI Engine analysis complete")
         reader.close()
         
     except Exception as e:
+        logger.error(f"Fatal execution error: {str(e)}")
         console.print(f"[bold red]Error:[/bold red] {str(e)}")
 
 if __name__ == "__main__":
