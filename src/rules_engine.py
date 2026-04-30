@@ -1,12 +1,13 @@
 import ipaddress
 import json
 import os
+import re
 from logger import get_logger
 
 logger = get_logger("RulesEngine")
 
 class Rule:
-    def __init__(self, rule_id, action, protocol=None, src_ip=None, dst_ip=None, src_port=None, dst_port=None, domain=None):
+    def __init__(self, rule_id, action, protocol=None, src_ip=None, dst_ip=None, src_port=None, dst_port=None, domain=None, payload_pattern=None):
         self.rule_id = rule_id
         self.action = action.upper()  # ALERT, BLOCK
         self.protocol = protocol
@@ -15,8 +16,17 @@ class Rule:
         self.src_port = src_port
         self.dst_port = dst_port
         self.domain = domain
+        self.payload_pattern = payload_pattern
+        self.compiled_pattern = None
+        if payload_pattern:
+            try:
+                # If it's a string pattern, encode to bytes. If already bytes, use it directly.
+                pattern_bytes = payload_pattern.encode('utf-8') if isinstance(payload_pattern, str) else payload_pattern
+                self.compiled_pattern = re.compile(pattern_bytes, re.IGNORECASE)
+            except Exception as e:
+                logger.error(f"Failed to compile regex payload pattern '{payload_pattern}': {str(e)}")
 
-    def matches(self, src_ip, src_port, dst_ip, dst_port, protocol, domain=None):
+    def matches(self, src_ip, src_port, dst_ip, dst_port, protocol, domain=None, payload=b''):
         """
         Evaluates if the packet/flow parameters match this rule.
         Note that direction is bidirectional, so we check both (src->dst) and (dst->src) matches.
@@ -31,7 +41,14 @@ class Rule:
         if self.domain and not self._match_domain(domain):
             return False
 
-        # 3. IP and Port matches (bidirectional)
+        # 3. Payload Match
+        if self.payload_pattern:
+            if not self.compiled_pattern or not payload:
+                return False
+            if not self.compiled_pattern.search(payload):
+                return False
+
+        # 4. IP and Port matches (bidirectional)
         # Check direct direction (src matches rule.src, dst matches rule.dst)
         direct_match = (
             self._match_ip(src_ip, self.src_ip) and
@@ -161,7 +178,8 @@ class RulesEngine:
                     dst_ip=r.get("dst_ip"),
                     src_port=r.get("src_port"),
                     dst_port=r.get("dst_port"),
-                    domain=r.get("domain")
+                    domain=r.get("domain"),
+                    payload_pattern=r.get("payload_pattern")
                 ))
 
     def load_rules_from_file(self, filepath):
@@ -204,19 +222,19 @@ class RulesEngine:
             logger.error(f"Exception during rules hot-reload: {str(e)}")
         return False
 
-    def evaluate_packet(self, src_ip, src_port, dst_ip, dst_port, protocol, domain=None):
+    def evaluate_packet(self, src_ip, src_port, dst_ip, dst_port, protocol, domain=None, payload=b''):
         """
         Evaluates details of a packet/flow.
         Returns the first matching Rule, or None.
         """
-        logger.debug(f"Evaluating packet: {src_ip}:{src_port} <-> {dst_ip}:{dst_port} | Proto={protocol} | Domain={domain}")
+        logger.debug(f"Evaluating packet: {src_ip}:{src_port} <-> {dst_ip}:{dst_port} | Proto={protocol} | Domain={domain} | PayloadSize={len(payload)}")
         for rule in self.rules:
-            if rule.matches(src_ip, src_port, dst_ip, dst_port, protocol, domain):
+            if rule.matches(src_ip, src_port, dst_ip, dst_port, protocol, domain, payload):
                 logger.info(f"Rule match: rule_id={rule.rule_id}, action={rule.action} for {src_ip}:{src_port} <-> {dst_ip}:{dst_port}")
                 return rule
         return None
 
-    def evaluate_flow(self, flow):
+    def evaluate_flow(self, flow, payload=b''):
         """
         Evaluates a Flow object.
         Returns the first matching Rule, or None.
@@ -229,5 +247,6 @@ class RulesEngine:
             dst_ip=ip_b,
             dst_port=port_b,
             protocol=protocol,
-            domain=flow.sni
+            domain=flow.sni,
+            payload=payload
         )

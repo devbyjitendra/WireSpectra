@@ -127,6 +127,7 @@ def main(filepath, rules, export_blocked, export_csv, report, new_rule, log_leve
                         tcp_payload = b''
                         fin_flag = False
                         rst_flag = False
+                        pkt_payload = b''
                         if ip_pkt.protocol == 6:  # TCP
                             try:
                                 tcp_pkt = TCPPacket(ip_pkt.payload)
@@ -137,6 +138,7 @@ def main(filepath, rules, export_blocked, export_csv, report, new_rule, log_leve
                                 flags = tcp_pkt.get_flags_str()
                                 proto_str = f"TCP [{flags}]" if flags else "TCP"
                                 tcp_payload = tcp_pkt.payload
+                                pkt_payload = tcp_payload
                                 fin_flag = tcp_pkt.fin
                                 rst_flag = tcp_pkt.rst
                             except Exception:
@@ -149,6 +151,7 @@ def main(filepath, rules, export_blocked, export_csv, report, new_rule, log_leve
                                 src_str = f"{src_ip}:{src_port}"
                                 dst_str = f"{dst_ip}:{dst_port}"
                                 proto_str = "UDP"
+                                pkt_payload = udp_pkt.payload
                             except Exception:
                                 pass
                         
@@ -169,7 +172,7 @@ def main(filepath, rules, export_blocked, export_csv, report, new_rule, log_leve
 
                         # Rules Engine Evaluation
                         if rules:
-                            matched_rule = rules_engine.evaluate_flow(flow)
+                            matched_rule = rules_engine.evaluate_flow(flow, payload=pkt_payload)
                             if matched_rule:
                                 if matched_rule.action == "BLOCK":
                                     flow.state = "BLOCKED"
