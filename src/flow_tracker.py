@@ -1,6 +1,7 @@
 from tls_parser import TLSParser
 from http_parser import HTTPParser
 from logger import get_logger
+from l7_decoders import L7Decoders
 
 logger = get_logger("FlowTracker")
 
@@ -107,22 +108,29 @@ class FlowTracker:
             if flow.state != prev_state:
                 logger.info(f"Flow state transition: {canonical_key[0]}:{canonical_key[1]} <-> {canonical_key[2]}:{canonical_key[3]} state={flow.state}")
 
-        # Application Classification (SNI/Host Extraction)
-        if protocol == 6 and not flow.sni and payload:
+        # Application Classification (SNI/Host Extraction and L7 Decoders)
+        if not flow.app_name and payload:
             try:
-                # Try TLS SNI first
-                hostname = TLSParser.extract_sni(payload)
-                if hostname:
-                    flow.sni = hostname
-                    flow.app_name = "HTTPS"
-                    logger.info(f"Flow classified: {canonical_key[0]}:{canonical_key[1]} <-> {canonical_key[2]}:{canonical_key[3]} | App=HTTPS | SNI={hostname}")
-                else:
-                    # Try HTTP Host next
-                    host = HTTPParser.extract_host(payload)
-                    if host:
-                        flow.sni = host
-                        flow.app_name = "HTTP"
-                        logger.info(f"Flow classified: {canonical_key[0]}:{canonical_key[1]} <-> {canonical_key[2]}:{canonical_key[3]} | App=HTTP | Host={host}")
+                # For TCP, check HTTPS and HTTP first
+                if protocol == 6:
+                    hostname = TLSParser.extract_sni(payload)
+                    if hostname:
+                        flow.sni = hostname
+                        flow.app_name = "HTTPS"
+                        logger.info(f"Flow classified: {canonical_key[0]}:{canonical_key[1]} <-> {canonical_key[2]}:{canonical_key[3]} | App=HTTPS | SNI={hostname}")
+                    else:
+                        host = HTTPParser.extract_host(payload)
+                        if host:
+                            flow.sni = host
+                            flow.app_name = "HTTP"
+                            logger.info(f"Flow classified: {canonical_key[0]}:{canonical_key[1]} <-> {canonical_key[2]}:{canonical_key[3]} | App=HTTP | Host={host}")
+                
+                # If still not classified, check other L7 decoders (SSH, DNS, FTP)
+                if not flow.app_name:
+                    l7_app = L7Decoders.classify_payload(payload, protocol)
+                    if l7_app:
+                        flow.app_name = l7_app
+                        logger.info(f"Flow classified: {canonical_key[0]}:{canonical_key[1]} <-> {canonical_key[2]}:{canonical_key[3]} | App={l7_app}")
             except Exception as e:
                 logger.warning(f"Error classifying application payload: {str(e)}")
 
