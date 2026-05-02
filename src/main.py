@@ -11,6 +11,7 @@ from pcap_writer import PcapWriter
 from reporter import CSVReporter, DPIReportGenerator
 from rule_builder import InteractiveRuleBuilder
 from logger import setup_logger, get_logger
+from anomaly_detector import AnomalyDetector
 
 console = Console()
 logger = get_logger("CLI")
@@ -55,6 +56,7 @@ def main(filepath, rules, export_blocked, export_csv, report, new_rule, log_leve
         return
 
     rules_engine = RulesEngine()
+    anomaly_detector = AnomalyDetector()
     if rules:
         try:
             rules_engine.load_rules_from_file(rules)
@@ -128,6 +130,7 @@ def main(filepath, rules, export_blocked, export_csv, report, new_rule, log_leve
                         fin_flag = False
                         rst_flag = False
                         pkt_payload = b''
+                        tcp_flags = []
                         if ip_pkt.protocol == 6:  # TCP
                             try:
                                 tcp_pkt = TCPPacket(ip_pkt.payload)
@@ -141,6 +144,13 @@ def main(filepath, rules, export_blocked, export_csv, report, new_rule, log_leve
                                 pkt_payload = tcp_payload
                                 fin_flag = tcp_pkt.fin
                                 rst_flag = tcp_pkt.rst
+                                
+                                if tcp_pkt.syn: tcp_flags.append("SYN")
+                                if tcp_pkt.ack: tcp_flags.append("ACK")
+                                if tcp_pkt.fin: tcp_flags.append("FIN")
+                                if tcp_pkt.rst: tcp_flags.append("RST")
+                                if tcp_pkt.psh: tcp_flags.append("PSH")
+                                if tcp_pkt.urg: tcp_flags.append("URG")
                             except Exception:
                                 pass
                         elif ip_pkt.protocol == 17:  # UDP
@@ -155,6 +165,22 @@ def main(filepath, rules, export_blocked, export_csv, report, new_rule, log_leve
                             except Exception:
                                 pass
                         
+                        # Run Anomaly Detection
+                        alert = anomaly_detector.process_packet(
+                            src_ip=src_ip,
+                            dst_ip=dst_ip,
+                            dst_port=dst_port,
+                            protocol=protocol,
+                            tcp_flags=tcp_flags
+                        )
+                        if alert:
+                            console.print(Panel(
+                                f"[bold yellow]⚠️ WARNING: Security Anomaly Alert [{alert['type']}][/bold yellow]\n"
+                                f"[white]Target: {alert['target']}[/white]\n"
+                                f"[white]{alert['details']}[/white]",
+                                border_style="yellow"
+                            ))
+
                         # Process connection flow tracking
                         flow = tracker.process_packet(
                             src_ip=src_ip,
@@ -216,6 +242,17 @@ def main(filepath, rules, export_blocked, export_csv, report, new_rule, log_leve
         console.print(f"\n[green]✔[/green] Analysis Complete.")
         console.print(f"    [bold]Total Packets:[/bold] {packet_count}")
         console.print(f"    [bold]Total Traffic:[/bold] {total_bytes / 1024:.2f} KB")
+
+        # Display Anomaly Alerts Summary Table
+        if anomaly_detector.all_alerts:
+            alerts_table = Table(title="Security Anomaly Alerts", box=None)
+            alerts_table.add_column("Type", style="bold red")
+            alerts_table.add_column("Target/Source", style="cyan")
+            alerts_table.add_column("Details", style="yellow")
+            for alert in anomaly_detector.all_alerts:
+                alerts_table.add_row(alert["type"], alert["target"], alert["details"])
+            console.print("\n")
+            console.print(alerts_table)
         
         # Display Flow tracking table
         all_flows = list(tracker.flows.values()) + list(tracker.expired_flows.values())
