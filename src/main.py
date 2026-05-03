@@ -22,6 +22,105 @@ def format_hex_preview(data, length=16):
     ascii_part = "".join(chr(b) if 32 <= b <= 126 else "." for b in data[:length])
     return f"{hex_part:<48} | {ascii_part}"
 
+def decode_packet_batch(batch):
+    """
+    Worker function to decode a batch of raw packets.
+    batch: list of tuples (packet_count, header, data)
+    """
+    from protocols import EthernetFrame, IPv4Packet, TCPPacket, UDPPacket
+    
+    results = []
+    for packet_count, header, data in batch:
+        res = {
+            "packet_count": packet_count,
+            "header": header,
+            "data": data,
+            "success": False,
+            "is_ip": False,
+            "src_str": "N/A",
+            "dst_str": "N/A",
+            "proto_str": "N/A"
+        }
+        try:
+            eth_frame = EthernetFrame(data)
+            res["src_str"] = eth_frame.src_mac
+            res["dst_str"] = eth_frame.dst_mac
+            res["proto_str"] = eth_frame.get_ethertype_name()
+            
+            if eth_frame.ethertype == 0x0800:  # IPv4
+                try:
+                    ip_pkt = IPv4Packet(eth_frame.payload)
+                    src_ip = ip_pkt.src_ip
+                    dst_ip = ip_pkt.dst_ip
+                    protocol = ip_pkt.protocol
+                    
+                    src_port = 0
+                    dst_port = 0
+                    res["src_str"] = src_ip
+                    res["dst_str"] = dst_ip
+                    res["proto_str"] = ip_pkt.get_protocol_name()
+                    
+                    tcp_payload = b''
+                    fin_flag = False
+                    rst_flag = False
+                    pkt_payload = b''
+                    tcp_flags = []
+                    
+                    if ip_pkt.protocol == 6:  # TCP
+                        try:
+                            tcp_pkt = TCPPacket(ip_pkt.payload)
+                            src_port = tcp_pkt.src_port
+                            dst_port = tcp_pkt.dst_port
+                            res["src_str"] = f"{src_ip}:{src_port}"
+                            res["dst_str"] = f"{dst_ip}:{dst_port}"
+                            flags = tcp_pkt.get_flags_str()
+                            res["proto_str"] = f"TCP [{flags}]" if flags else "TCP"
+                            tcp_payload = tcp_pkt.payload
+                            pkt_payload = tcp_payload
+                            fin_flag = tcp_pkt.fin
+                            rst_flag = tcp_pkt.rst
+                            
+                            if tcp_pkt.syn: tcp_flags.append("SYN")
+                            if tcp_pkt.ack: tcp_flags.append("ACK")
+                            if tcp_pkt.fin: tcp_flags.append("FIN")
+                            if tcp_pkt.rst: tcp_flags.append("RST")
+                            if tcp_pkt.psh: tcp_flags.append("PSH")
+                            if tcp_pkt.urg: tcp_flags.append("URG")
+                        except Exception:
+                            pass
+                    elif ip_pkt.protocol == 17:  # UDP
+                        try:
+                            udp_pkt = UDPPacket(ip_pkt.payload)
+                            src_port = udp_pkt.src_port
+                            dst_port = udp_pkt.dst_port
+                            res["src_str"] = f"{src_ip}:{src_port}"
+                            res["dst_str"] = f"{dst_ip}:{dst_port}"
+                            res["proto_str"] = "UDP"
+                            pkt_payload = udp_pkt.payload
+                        except Exception:
+                            pass
+                            
+                    res["is_ip"] = True
+                    res["ip_data"] = {
+                        "src_ip": src_ip,
+                        "dst_ip": dst_ip,
+                        "src_port": src_port,
+                        "dst_port": dst_port,
+                        "protocol": protocol,
+                        "tcp_payload": tcp_payload,
+                        "fin_flag": fin_flag,
+                        "rst_flag": rst_flag,
+                        "pkt_payload": pkt_payload,
+                        "tcp_flags": tcp_flags
+                    }
+                except Exception:
+                    pass
+            res["success"] = True
+        except Exception:
+            pass
+        results.append(res)
+    return results
+
 @click.command()
 @click.argument('filepath', required=False)
 @click.option('--rules', type=click.Path(exists=True), help='Path to rules JSON file')
@@ -31,7 +130,9 @@ def format_hex_preview(data, length=16):
 @click.option('--new-rule', is_flag=True, help='Launch interactive rule builder')
 @click.option('--log-level', type=click.Choice(['DEBUG', 'INFO', 'WARNING', 'ERROR'], case_sensitive=False), default='WARNING', help='Set logging verbosity level')
 @click.option('--log-file', type=click.Path(), default='dpi_engine.log', help='Path to output log file')
-def main(filepath, rules, export_blocked, export_csv, report, new_rule, log_level, log_file):
+@click.option('--parallel', is_flag=True, help='Enable parallel packet decoding mode')
+@click.option('--workers', type=int, default=None, help='Number of parallel worker processes')
+def main(filepath, rules, export_blocked, export_csv, report, new_rule, log_level, log_file, parallel, workers):
     setup_logger(log_level, log_file)
     logger.info("WireSpectra DPI Engine starting up...")
 
@@ -99,145 +200,256 @@ def main(filepath, rules, export_blocked, export_csv, report, new_rule, log_leve
         first_packet_ts = None
         last_packet_ts = None
         
-        for header, data in reader:
-            packet_count += 1
-            total_bytes += header['length']
-            if first_packet_ts is None:
-                first_packet_ts = header['timestamp']
-            last_packet_ts = header['timestamp']
-            
-            src_str, dst_str, proto_str = "N/A", "N/A", "N/A"
-            try:
-                eth_frame = EthernetFrame(data)
-                src_str = eth_frame.src_mac
-                dst_str = eth_frame.dst_mac
-                proto_str = eth_frame.get_ethertype_name()
+        if parallel:
+            import multiprocessing
+            # Load raw packets
+            all_raw_packets = list(reader)
+            # Batch them
+            batch_size = 100
+            batches = []
+            current_batch = []
+            for i, (header, data) in enumerate(all_raw_packets):
+                current_batch.append((i + 1, header, data))
+                if len(current_batch) == batch_size:
+                    batches.append(current_batch)
+                    current_batch = []
+            if current_batch:
+                batches.append(current_batch)
                 
-                if eth_frame.ethertype == 0x0800:  # IPv4
-                    try:
-                        ip_pkt = IPv4Packet(eth_frame.payload)
-                        src_ip = ip_pkt.src_ip
-                        dst_ip = ip_pkt.dst_ip
-                        protocol = ip_pkt.protocol
+            num_workers = workers if workers else multiprocessing.cpu_count()
+            with multiprocessing.Pool(processes=num_workers) as pool:
+                results_generator = pool.imap(decode_packet_batch, batches)
+                for batch_results in results_generator:
+                    for res in batch_results:
+                        packet_count = res["packet_count"]
+                        header = res["header"]
+                        data = res["data"]
                         
-                        src_port = 0
-                        dst_port = 0
-                        src_str = src_ip
-                        dst_str = dst_ip
-                        proto_str = ip_pkt.get_protocol_name()
+                        total_bytes += header['length']
+                        if first_packet_ts is None:
+                            first_packet_ts = header['timestamp']
+                        last_packet_ts = header['timestamp']
                         
-                        tcp_payload = b''
-                        fin_flag = False
-                        rst_flag = False
-                        pkt_payload = b''
-                        tcp_flags = []
-                        if ip_pkt.protocol == 6:  # TCP
-                            try:
-                                tcp_pkt = TCPPacket(ip_pkt.payload)
-                                src_port = tcp_pkt.src_port
-                                dst_port = tcp_pkt.dst_port
-                                src_str = f"{src_ip}:{src_port}"
-                                dst_str = f"{dst_ip}:{dst_port}"
-                                flags = tcp_pkt.get_flags_str()
-                                proto_str = f"TCP [{flags}]" if flags else "TCP"
-                                tcp_payload = tcp_pkt.payload
-                                pkt_payload = tcp_payload
-                                fin_flag = tcp_pkt.fin
-                                rst_flag = tcp_pkt.rst
-                                
-                                if tcp_pkt.syn: tcp_flags.append("SYN")
-                                if tcp_pkt.ack: tcp_flags.append("ACK")
-                                if tcp_pkt.fin: tcp_flags.append("FIN")
-                                if tcp_pkt.rst: tcp_flags.append("RST")
-                                if tcp_pkt.psh: tcp_flags.append("PSH")
-                                if tcp_pkt.urg: tcp_flags.append("URG")
-                            except Exception:
-                                pass
-                        elif ip_pkt.protocol == 17:  # UDP
-                            try:
-                                udp_pkt = UDPPacket(ip_pkt.payload)
-                                src_port = udp_pkt.src_port
-                                dst_port = udp_pkt.dst_port
-                                src_str = f"{src_ip}:{src_port}"
-                                dst_str = f"{dst_ip}:{dst_port}"
-                                proto_str = "UDP"
-                                pkt_payload = udp_pkt.payload
-                            except Exception:
-                                pass
+                        src_str = res["src_str"]
+                        dst_str = res["dst_str"]
+                        proto_str = res["proto_str"]
                         
-                        # Run Anomaly Detection
-                        alert = anomaly_detector.process_packet(
-                            src_ip=src_ip,
-                            dst_ip=dst_ip,
-                            dst_port=dst_port,
-                            protocol=protocol,
-                            tcp_flags=tcp_flags
-                        )
-                        if alert:
-                            console.print(Panel(
-                                f"[bold yellow]⚠️ WARNING: Security Anomaly Alert [{alert['type']}][/bold yellow]\n"
-                                f"[white]Target: {alert['target']}[/white]\n"
-                                f"[white]{alert['details']}[/white]",
-                                border_style="yellow"
-                            ))
+                        if res["success"] and res["is_ip"]:
+                            ip_data = res["ip_data"]
+                            src_ip = ip_data["src_ip"]
+                            dst_ip = ip_data["dst_ip"]
+                            src_port = ip_data["src_port"]
+                            dst_port = ip_data["dst_port"]
+                            protocol = ip_data["protocol"]
+                            tcp_payload = ip_data["tcp_payload"]
+                            fin_flag = ip_data["fin_flag"]
+                            rst_flag = ip_data["rst_flag"]
+                            pkt_payload = ip_data["pkt_payload"]
+                            tcp_flags = ip_data["tcp_flags"]
+                            
+                            # Run Anomaly Detection
+                            alert = anomaly_detector.process_packet(
+                                src_ip=src_ip,
+                                dst_ip=dst_ip,
+                                dst_port=dst_port,
+                                protocol=protocol,
+                                tcp_flags=tcp_flags
+                            )
+                            if alert:
+                                console.print(Panel(
+                                    f"[bold yellow]⚠️ WARNING: Security Anomaly Alert [{alert['type']}][/bold yellow]\n"
+                                    f"[white]Target: {alert['target']}[/white]\n"
+                                    f"[white]{alert['details']}[/white]",
+                                    border_style="yellow"
+                                ))
 
-                        # Process connection flow tracking
-                        flow = tracker.process_packet(
-                            src_ip=src_ip,
-                            src_port=src_port,
-                            dst_ip=dst_ip,
-                            dst_port=dst_port,
-                            protocol=protocol,
-                            length=header['length'],
-                            timestamp=header['timestamp'],
-                            payload=tcp_payload,
-                            fin=fin_flag,
-                            rst=rst_flag,
-                            raw_data=data
-                        )
+                            # Process connection flow tracking
+                            flow = tracker.process_packet(
+                                src_ip=src_ip,
+                                src_port=src_port,
+                                dst_ip=dst_ip,
+                                dst_port=dst_port,
+                                protocol=protocol,
+                                length=header['length'],
+                                timestamp=header['timestamp'],
+                                payload=tcp_payload,
+                                fin=fin_flag,
+                                rst=rst_flag,
+                                raw_data=data
+                            )
 
-                        # Rules Engine Evaluation
-                        if rules:
-                            matched_rule = rules_engine.evaluate_flow(flow, payload=pkt_payload)
-                            if matched_rule:
-                                if matched_rule.action == "BLOCK":
-                                    flow.state = "BLOCKED"
-                                # Store matched rule on flow for metadata / printing
-                                flow.matched_rule = matched_rule
-                                
-                                # Add alert prefix to the CLI packet type
-                                if matched_rule.action == "BLOCK":
-                                    proto_str = f"[red]BLOCK ({matched_rule.rule_id})[/red] " + proto_str
-                                else:
-                                    proto_str = f"[yellow]ALERT ({matched_rule.rule_id})[/yellow] " + proto_str
-                        # Periodically clean up expired flows and reload rules (every 100 packets)
-                        if packet_count % 100 == 0:
-                            tracker.cleanup_expired_flows(header['timestamp'])
+                            # Rules Engine Evaluation
                             if rules:
-                                if rules_engine.check_and_reload():
-                                    console.print(f"\n[bold green][*] Rules configuration modified. Hot-reloaded {len(rules_engine.rules)} rules.[/bold green]\n")
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-            if packet_count <= 5:
-                packet_table.add_row(
-                    str(packet_count),
-                    f"{header['timestamp']:.6f}",
-                    src_str,
-                    dst_str,
-                    proto_str,
-                    f"{header['length']} B",
-                    format_hex_preview(data)
-                )
-            
-            if packet_count == 5:
+                                matched_rule = rules_engine.evaluate_flow(flow, payload=pkt_payload)
+                                if matched_rule:
+                                    if matched_rule.action == "BLOCK":
+                                        flow.state = "BLOCKED"
+                                    flow.matched_rule = matched_rule
+                                    
+                                    if matched_rule.action == "BLOCK":
+                                        proto_str = f"[red]BLOCK ({matched_rule.rule_id})[/red] " + proto_str
+                                    else:
+                                        proto_str = f"[yellow]ALERT ({matched_rule.rule_id})[/yellow] " + proto_str
+                                        
+                            if packet_count % 100 == 0:
+                                tracker.cleanup_expired_flows(header['timestamp'])
+                                if rules:
+                                    if rules_engine.check_and_reload():
+                                        console.print(f"\n[bold green][*] Rules configuration modified. Hot-reloaded {len(rules_engine.rules)} rules.[/bold green]\n")
+                        
+                        if packet_count <= 5:
+                            packet_table.add_row(
+                                str(packet_count),
+                                f"{header['timestamp']:.6f}",
+                                src_str,
+                                dst_str,
+                                proto_str,
+                                f"{header['length']} B",
+                                format_hex_preview(data)
+                            )
+                        if packet_count == 5:
+                            console.print(packet_table)
+                            console.print("    [dim]... processing remaining packets ...[/dim]")
+        else:
+            for header, data in reader:
+                packet_count += 1
+                total_bytes += header['length']
+                if first_packet_ts is None:
+                    first_packet_ts = header['timestamp']
+                last_packet_ts = header['timestamp']
+                
+                src_str, dst_str, proto_str = "N/A", "N/A", "N/A"
+                try:
+                    eth_frame = EthernetFrame(data)
+                    src_str = eth_frame.src_mac
+                    dst_str = eth_frame.dst_mac
+                    proto_str = eth_frame.get_ethertype_name()
+                    
+                    if eth_frame.ethertype == 0x0800:  # IPv4
+                        try:
+                            ip_pkt = IPv4Packet(eth_frame.payload)
+                            src_ip = ip_pkt.src_ip
+                            dst_ip = ip_pkt.dst_ip
+                            protocol = ip_pkt.protocol
+                            
+                            src_port = 0
+                            dst_port = 0
+                            src_str = src_ip
+                            dst_str = dst_ip
+                            proto_str = ip_pkt.get_protocol_name()
+                            
+                            tcp_payload = b''
+                            fin_flag = False
+                            rst_flag = False
+                            pkt_payload = b''
+                            tcp_flags = []
+                            if ip_pkt.protocol == 6:  # TCP
+                                try:
+                                    tcp_pkt = TCPPacket(ip_pkt.payload)
+                                    src_port = tcp_pkt.src_port
+                                    dst_port = tcp_pkt.dst_port
+                                    src_str = f"{src_ip}:{src_port}"
+                                    dst_str = f"{dst_ip}:{dst_port}"
+                                    flags = tcp_pkt.get_flags_str()
+                                    proto_str = f"TCP [{flags}]" if flags else "TCP"
+                                    tcp_payload = tcp_pkt.payload
+                                    pkt_payload = tcp_payload
+                                    fin_flag = tcp_pkt.fin
+                                    rst_flag = tcp_pkt.rst
+                                    
+                                    if tcp_pkt.syn: tcp_flags.append("SYN")
+                                    if tcp_pkt.ack: tcp_flags.append("ACK")
+                                    if tcp_pkt.fin: tcp_flags.append("FIN")
+                                    if tcp_pkt.rst: tcp_flags.append("RST")
+                                    if tcp_pkt.psh: tcp_flags.append("PSH")
+                                    if tcp_pkt.urg: tcp_flags.append("URG")
+                                except Exception:
+                                    pass
+                            elif ip_pkt.protocol == 17:  # UDP
+                                try:
+                                    udp_pkt = UDPPacket(ip_pkt.payload)
+                                    src_port = udp_pkt.src_port
+                                    dst_port = udp_pkt.dst_port
+                                    src_str = f"{src_ip}:{src_port}"
+                                    dst_str = f"{dst_ip}:{dst_port}"
+                                    proto_str = "UDP"
+                                    pkt_payload = udp_pkt.payload
+                                except Exception:
+                                    pass
+                            
+                            # Run Anomaly Detection
+                            alert = anomaly_detector.process_packet(
+                                src_ip=src_ip,
+                                dst_ip=dst_ip,
+                                dst_port=dst_port,
+                                protocol=protocol,
+                                tcp_flags=tcp_flags
+                            )
+                            if alert:
+                                console.print(Panel(
+                                    f"[bold yellow]⚠️ WARNING: Security Anomaly Alert [{alert['type']}][/bold yellow]\n"
+                                    f"[white]Target: {alert['target']}[/white]\n"
+                                    f"[white]{alert['details']}[/white]",
+                                    border_style="yellow"
+                                ))
+    
+                            # Process connection flow tracking
+                            flow = tracker.process_packet(
+                                src_ip=src_ip,
+                                src_port=src_port,
+                                dst_ip=dst_ip,
+                                dst_port=dst_port,
+                                protocol=protocol,
+                                length=header['length'],
+                                timestamp=header['timestamp'],
+                                payload=tcp_payload,
+                                fin=fin_flag,
+                                rst=rst_flag,
+                                raw_data=data
+                            )
+    
+                            # Rules Engine Evaluation
+                            if rules:
+                                matched_rule = rules_engine.evaluate_flow(flow, payload=pkt_payload)
+                                if matched_rule:
+                                    if matched_rule.action == "BLOCK":
+                                        flow.state = "BLOCKED"
+                                    # Store matched rule on flow for metadata / printing
+                                    flow.matched_rule = matched_rule
+                                    
+                                    # Add alert prefix to the CLI packet type
+                                    if matched_rule.action == "BLOCK":
+                                        proto_str = f"[red]BLOCK ({matched_rule.rule_id})[/red] " + proto_str
+                                    else:
+                                        proto_str = f"[yellow]ALERT ({matched_rule.rule_id})[/yellow] " + proto_str
+                            # Periodically clean up expired flows and reload rules (every 100 packets)
+                            if packet_count % 100 == 0:
+                                tracker.cleanup_expired_flows(header['timestamp'])
+                                if rules:
+                                    if rules_engine.check_and_reload():
+                                        console.print(f"\n[bold green][*] Rules configuration modified. Hot-reloaded {len(rules_engine.rules)} rules.[/bold green]\n")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+    
+                if packet_count <= 5:
+                    packet_table.add_row(
+                        str(packet_count),
+                        f"{header['timestamp']:.6f}",
+                        src_str,
+                        dst_str,
+                        proto_str,
+                        f"{header['length']} B",
+                        format_hex_preview(data)
+                    )
+                
+                if packet_count == 5:
+                    console.print(packet_table)
+                    console.print("    [dim]... processing remaining packets ...[/dim]")
+    
+            if packet_count < 5:
                 console.print(packet_table)
-                console.print("    [dim]... processing remaining packets ...[/dim]")
-
-        if packet_count < 5:
-            console.print(packet_table)
 
         console.print(f"\n[green]✔[/green] Analysis Complete.")
         console.print(f"    [bold]Total Packets:[/bold] {packet_count}")
