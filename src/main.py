@@ -132,7 +132,8 @@ def decode_packet_batch(batch):
 @click.option('--log-file', type=click.Path(), default='dpi_engine.log', help='Path to output log file')
 @click.option('--parallel', is_flag=True, help='Enable parallel packet decoding mode')
 @click.option('--workers', type=int, default=None, help='Number of parallel worker processes')
-def main(filepath, rules, export_blocked, export_csv, report, new_rule, log_level, log_file, parallel, workers):
+@click.option('--export-json', type=click.Path(), help='Path to export flow statistics as JSON')
+def main(filepath, rules, export_blocked, export_csv, report, new_rule, log_level, log_file, parallel, workers, export_json):
     setup_logger(log_level, log_file)
     logger.info("WireSpectra DPI Engine starting up...")
 
@@ -546,6 +547,70 @@ def main(filepath, rules, export_blocked, export_csv, report, new_rule, log_leve
             except Exception as e:
                 logger.error(f"Error exporting CSV: {str(e)}")
                 console.print(f"[bold red]Error exporting CSV:[/bold red] {str(e)}")
+
+        # Export JSON if requested
+        if export_json and all_flows:
+            import json
+            try:
+                duration = (last_packet_ts - first_packet_ts) if (last_packet_ts and first_packet_ts) else 0.0
+                throughput = DPIReportGenerator.generate_throughput_summary(packet_count, total_bytes, duration)
+                dist = DPIReportGenerator.generate_distribution_report(all_flows)
+                
+                # Format flows
+                flows_list = []
+                for idx, flow in enumerate(all_flows, 1):
+                    ip_a, port_a, ip_b, port_b, proto = flow.flow_key
+                    dur = flow.duration
+                    pkts_per_sec = flow.packet_count / dur if dur > 0 else 0.0
+                    bytes_per_sec = flow.byte_count / dur if dur > 0 else 0.0
+                    
+                    status_str = "ACTIVE"
+                    if flow.state == "BLOCKED":
+                        status_str = "BLOCKED"
+                    elif flow.state == "CLOSED":
+                        status_str = "CLOSED"
+                    elif flow.state == "EXPIRED":
+                        status_str = "EXPIRED"
+                    
+                    flows_list.append({
+                        "flow_id": idx,
+                        "protocol": flow.protocol_name,
+                        "app_name": flow.app_name or "Unclassified",
+                        "sni": flow.sni or "",
+                        "src_ip": ip_a,
+                        "src_port": port_a,
+                        "dst_ip": ip_b,
+                        "dst_port": port_b,
+                        "packets": flow.packet_count,
+                        "bytes": flow.byte_count,
+                        "duration_sec": round(dur, 4),
+                        "packets_per_sec": round(pkts_per_sec, 2),
+                        "bytes_per_sec": round(bytes_per_sec, 2),
+                        "status": status_str
+                    })
+                
+                report_data = {
+                    "summary": {
+                        "total_packets": packet_count,
+                        "total_bytes": total_bytes,
+                        "duration_sec": round(duration, 4),
+                        "avg_pps": round(throughput["avg_pps"], 2),
+                        "avg_kbps": round(throughput["avg_kbps"], 2)
+                    },
+                    "protocols": dist["protocols"],
+                    "applications": dist["applications"],
+                    "alerts": anomaly_detector.all_alerts,
+                    "flows": flows_list
+                }
+                
+                with open(export_json, "w", encoding="utf-8") as f:
+                    json.dump(report_data, f, indent=4)
+                    
+                logger.info(f"Successfully exported flow statistics in JSON format to {export_json}")
+                console.print(f"\n[green]✔[/green] Flow statistics exported to JSON: [cyan]{export_json}[/cyan]")
+            except Exception as e:
+                logger.error(f"Error exporting JSON: {str(e)}")
+                console.print(f"[bold red]Error exporting JSON:[/bold red] {str(e)}")
 
         # Print advanced report if requested
         if report and all_flows:
