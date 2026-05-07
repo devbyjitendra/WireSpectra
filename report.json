@@ -1,0 +1,110 @@
+{
+    "summary": {
+        "total_packets": 24,
+        "total_bytes": 2105,
+        "duration_sec": 1.0,
+        "avg_pps": 24.0,
+        "avg_kbps": 16.84
+    },
+    "protocols": {
+        "TCP": {
+            "packets": 23,
+            "bytes": 2035,
+            "packets_pct": 95.83333333333334,
+            "bytes_pct": 96.67458432304038
+        },
+        "UDP": {
+            "packets": 1,
+            "bytes": 70,
+            "packets_pct": 4.166666666666666,
+            "bytes_pct": 3.32541567695962
+        }
+    },
+    "applications": {
+        "HTTP": {
+            "packets": 6,
+            "bytes": 480,
+            "packets_pct": 25.0,
+            "bytes_pct": 22.802850356294538
+        },
+        "Unclassified": {
+            "packets": 10,
+            "bytes": 896,
+            "packets_pct": 41.66666666666667,
+            "bytes_pct": 42.565320665083135
+        },
+        "SSH": {
+            "packets": 8,
+            "bytes": 729,
+            "packets_pct": 33.33333333333333,
+            "bytes_pct": 34.63182897862232
+        }
+    },
+    "alerts": [],
+    "flows": [
+        {
+            "flow_id": 1,
+            "protocol": "TCP",
+            "app_name": "HTTP",
+            "sni": "example.com",
+            "src_ip": "192.168.1.10",
+            "src_port": 54321,
+            "dst_ip": "93.184.216.34",
+            "dst_port": 80,
+            "packets": 6,
+            "bytes": 480,
+            "duration_sec": 0.09,
+            "packets_per_sec": 66.67,
+            "bytes_per_sec": 5333.32,
+            "status": "ACTIVE"
+        },
+        {
+            "flow_id": 2,
+            "protocol": "UDP",
+            "app_name": "Unclassified",
+            "sni": "",
+            "src_ip": "192.168.1.10",
+            "src_port": 55000,
+            "dst_ip": "8.8.8.8",
+            "dst_port": 53,
+            "packets": 1,
+            "bytes": 70,
+            "duration_sec": 0.0,
+            "packets_per_sec": 0.0,
+            "bytes_per_sec": 0.0,
+            "status": "ACTIVE"
+        },
+        {
+            "flow_id": 3,
+            "protocol": "TCP",
+            "app_name": "Unclassified",
+            "sni": "",
+            "src_ip": "140.82.114.4",
+            "src_port": 443,
+            "dst_ip": "192.168.1.10",
+            "dst_port": 60000,
+            "packets": 9,
+            "bytes": 826,
+            "duration_sec": 0.3,
+            "packets_per_sec": 30.0,
+            "bytes_per_sec": 2753.33,
+            "status": "ACTIVE"
+        },
+        {
+            "flow_id": 4,
+            "protocol": "TCP",
+            "app_name": "SSH",
+            "sni": "",
+            "src_ip": "10.0.0.5",
+            "src_port": 22,
+            "dst_ip": "192.168.1.10",
+            "dst_port": 40000,
+            "packets": 8,
+            "bytes": 729,
+            "duration_sec": 0.4,
+            "packets_per_sec": 20.0,
+            "bytes_per_sec": 1822.5,
+            "status": "ACTIVE"
+        }
+    ]
+}

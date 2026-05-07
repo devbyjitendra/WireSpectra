@@ -1,4 +1,5 @@
 import sys
+import io
 import click
 from rich.console import Console
 from rich.panel import Panel
@@ -12,6 +13,11 @@ from reporter import CSVReporter, DPIReportGenerator
 from rule_builder import InteractiveRuleBuilder
 from logger import setup_logger, get_logger
 from anomaly_detector import AnomalyDetector
+
+# Force UTF-8 output on Windows to avoid cp1252 UnicodeEncodeError with special chars
+if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 console = Console()
 logger = get_logger("CLI")
@@ -452,7 +458,7 @@ def main(filepath, rules, export_blocked, export_csv, report, new_rule, log_leve
             if packet_count < 5:
                 console.print(packet_table)
 
-        console.print(f"\n[green]✔[/green] Analysis Complete.")
+        console.print(f"\n[green][OK][/green] Analysis Complete.")
         console.print(f"    [bold]Total Packets:[/bold] {packet_count}")
         console.print(f"    [bold]Total Traffic:[/bold] {total_bytes / 1024:.2f} KB")
 
@@ -530,7 +536,7 @@ def main(filepath, rules, export_blocked, export_csv, report, new_rule, log_leve
                         total_bytes_written += len(pkt_data)
                     writer.close()
                     logger.info(f"Successfully exported {len(blocked_packets)} blocked packets ({total_bytes_written} bytes) to {export_blocked}")
-                    console.print(f"\n[green]✔[/green] Exported {len(blocked_packets)} blocked packets ({total_bytes_written / 1024:.2f} KB) to [cyan]{export_blocked}[/cyan]")
+                    console.print(f"\n[green][OK][/green] Exported {len(blocked_packets)} blocked packets ({total_bytes_written / 1024:.2f} KB) to [cyan]{export_blocked}[/cyan]")
                 except Exception as e:
                     logger.error(f"Error exporting packets: {str(e)}")
                     console.print(f"[bold red]Error exporting packets:[/bold red] {str(e)}")
@@ -543,7 +549,7 @@ def main(filepath, rules, export_blocked, export_csv, report, new_rule, log_leve
             try:
                 CSVReporter.export_flows(all_flows, export_csv)
                 logger.info(f"Successfully exported flow statistics to {export_csv}")
-                console.print(f"\n[green]✔[/green] Flow statistics exported to CSV: [cyan]{export_csv}[/cyan]")
+                console.print(f"\n[green][OK][/green] Flow statistics exported to CSV: [cyan]{export_csv}[/cyan]")
             except Exception as e:
                 logger.error(f"Error exporting CSV: {str(e)}")
                 console.print(f"[bold red]Error exporting CSV:[/bold red] {str(e)}")
@@ -607,7 +613,7 @@ def main(filepath, rules, export_blocked, export_csv, report, new_rule, log_leve
                     json.dump(report_data, f, indent=4)
                     
                 logger.info(f"Successfully exported flow statistics in JSON format to {export_json}")
-                console.print(f"\n[green]✔[/green] Flow statistics exported to JSON: [cyan]{export_json}[/cyan]")
+                console.print(f"\n[green][OK][/green] Flow statistics exported to JSON: [cyan]{export_json}[/cyan]")
             except Exception as e:
                 logger.error(f"Error exporting JSON: {str(e)}")
                 console.print(f"[bold red]Error exporting JSON:[/bold red] {str(e)}")
