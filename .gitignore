@@ -9,3 +9,7 @@ venv/
 outputs/
 .pytest_cache/
 DEVELOPMENT_LOG.md
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
