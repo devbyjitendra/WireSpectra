@@ -68,6 +68,9 @@ WEBSITES = [
     ("10.0.0.5", 22, "SSH", ""),
     ("8.8.8.8", 53, "DNS", "dns.google"),
     ("192.168.1.254", 21, "FTP", ""),
+    ("172.217.16.142", 443, "HTTPS", "youtube.com"),
+    ("31.13.71.36", 443, "HTTPS", "facebook.com"),
+    ("185.60.218.35", 443, "HTTPS", "netflix.com"),
 ]
 
 # Helper functions to build packets (similar to scripts/generate_test_pcap.py)
@@ -123,34 +126,45 @@ TLS_CLIENT_HELLO_TEMPLATE = [
 def make_tls_hello(sni: str) -> bytes:
     sni_bytes = sni.encode('utf-8')
     name_len = len(sni_bytes)
-    # Rebuild extension lengths
-    list_len = name_len + 3
-    ext_len = list_len + 8
+    
+    # Server name list length = 1 (type) + 2 (len) + name_len = 3 + name_len
+    list_len = 3 + name_len
+    # SNI extension length = 2 (list_len header) + list_len = 5 + name_len
+    sni_ext_len = 2 + list_len
+    # Extensions length = 2 (type) + 2 (len) + sni_ext_len = 6 + list_len = 9 + name_len
+    ext_len = 4 + sni_ext_len
+    
+    # Handshake payload size = 43 + ext_len
+    handshake_len = 43 + ext_len
+    
+    # Record payload size = 47 + ext_len
+    record_len = 47 + ext_len
     
     payload = bytearray([
         0x16, 0x03, 0x01,
-        0x00, 43 + ext_len  # record length
+        (record_len >> 8) & 0xFF, record_len & 0xFF  # record length
     ])
-    # Client Hello
-    payload.extend([0x01, 0x00, 0x00, 39 + ext_len])
-    # TLS 1.2
+    # Client Hello (type=0x01, length=3 bytes)
+    payload.extend([0x01, 0x00, (handshake_len >> 8) & 0xFF, handshake_len & 0xFF])
+    # TLS 1.2 Version (0x03, 0x03)
     payload.extend([0x03, 0x03])
     # Random 32 bytes
     payload.extend([0xAB] * 32)
-    # Session ID, Ciphers, Compression
+    # Session ID length (0), Cipher suites length (2), Cipher suite (0x002f), Compression length (1), Compression method (0)
     payload.extend([0x00, 0x00, 0x02, 0x00, 0x2f, 0x01, 0x00])
-    # Extensions length
+    # Extensions length (2 bytes)
     payload.extend(struct.pack('!H', ext_len))
     # SNI extension type (0)
     payload.extend([0x00, 0x00])
-    # SNI extension length
-    payload.extend(struct.pack('!H', list_len + 4))
-    # Server name list length
-    payload.extend(struct.pack('!H', list_len + 2))
+    # SNI extension length (2 bytes)
+    payload.extend(struct.pack('!H', sni_ext_len))
+    # Server name list length (2 bytes)
+    payload.extend(struct.pack('!H', list_len))
     # Hostname name type (0)
     payload.extend([0x00])
-    # Name length
+    # Name length (2 bytes)
     payload.extend(struct.pack('!H', name_len))
+    # Hostname bytes
     payload.extend(sni_bytes)
     return bytes(payload)
 
@@ -260,7 +274,7 @@ def live_generator_loop():
 
     while True:
         try:
-            time.sleep(1.2) # Generate packet(s) every 1.2s
+            time.sleep(0.4) # Generate packet(s) every 0.4s
 
             with state_lock:
                 ts = time.time()
@@ -305,6 +319,10 @@ def live_generator_loop():
                         flow_info["state"] = "FIN"
                     elif state == "FIN":
                         raw_pkt = make_packet(client, dst_ip, src_port, dst_port, 6, 0x11, b'', pkt_id)
+                        process_one_packet(raw_pkt, ts)
+                        server_fin = make_packet(dst_ip, client, dst_port, src_port, 6, 0x11, b'', pkt_id)
+                        process_one_packet(server_fin, ts + 0.01)
+                        raw_pkt = None
                         del flow_sequence_ids[flow_key]
                 elif proto_name == "HTTPS":
                     if state == "SYN":
@@ -324,6 +342,10 @@ def live_generator_loop():
                             flow_info["seq_num"] += 1
                     elif state == "FIN":
                         raw_pkt = make_packet(client, dst_ip, src_port, dst_port, 6, 0x11, b'', pkt_id)
+                        process_one_packet(raw_pkt, ts)
+                        server_fin = make_packet(dst_ip, client, dst_port, src_port, 6, 0x11, b'', pkt_id)
+                        process_one_packet(server_fin, ts + 0.01)
+                        raw_pkt = None
                         del flow_sequence_ids[flow_key]
                 elif proto_name == "SSH":
                     if state == "SYN":
@@ -340,6 +362,10 @@ def live_generator_loop():
                             flow_info["seq_num"] += 1
                     elif state == "FIN":
                         raw_pkt = make_packet(client, dst_ip, src_port, dst_port, 6, 0x11, b'', pkt_id)
+                        process_one_packet(raw_pkt, ts)
+                        server_fin = make_packet(dst_ip, client, dst_port, src_port, 6, 0x11, b'', pkt_id)
+                        process_one_packet(server_fin, ts + 0.01)
+                        raw_pkt = None
                         del flow_sequence_ids[flow_key]
                 else: # FTP or general TCP
                     raw_pkt = make_packet(client, dst_ip, src_port, dst_port, 6, 0x02, b'', pkt_id)
@@ -347,6 +373,9 @@ def live_generator_loop():
 
                 if raw_pkt:
                     process_one_packet(raw_pkt, ts)
+
+                # Periodically clean up expired flows (idle > 15 seconds, closed > 3 seconds)
+                tracker.cleanup_expired_flows(ts, idle_timeout=15.0, closed_timeout=3.0)
 
                 # Occasionally generate a Port Scan anomaly to show off alerts!
                 if random.random() < 0.08:
@@ -482,6 +511,149 @@ def post_reset():
     with state_lock:
         reset_live_state()
     return {"status": "reset success"}
+
+from pydantic import BaseModel
+
+class BlockRequest(BaseModel):
+    domain: str
+
+class PingRequest(BaseModel):
+    host: str
+
+@app.get("/api/rules")
+def get_rules():
+    with state_lock:
+        return {"blocked_domains": [r.domain for r in rules_engine.rules if r.action == "BLOCK" and r.domain]}
+
+@app.post("/api/rules/block")
+def post_block(req: BlockRequest):
+    with state_lock:
+        domain = req.domain.strip()
+        rules_engine.add_domain_block(domain)
+        # Find the rule we just added
+        rule_id = f"BLOCK_{domain.upper().replace('.', '_')}"
+        added_rule = next((r for r in rules_engine.rules if r.rule_id == rule_id), None)
+        
+        # Immediately set status of any existing active flows to blocked
+        for flow in tracker.flows.values():
+            if flow.sni == domain or (hasattr(flow, 'sni') and flow.sni and flow.sni.endswith(domain)):
+                flow.state = "BLOCKED"
+                flow.matched_rule = added_rule
+
+        # Instantly inject a synthetic SYN + TLS ClientHello sequence to the newly blocked domain
+        # so it is guaranteed to show up in the connection table immediately as BLOCKED
+        client = random.choice(CLIENT_IPS)
+        dst_ip = "142.250.190.46"  # Fallback IP (e.g. google.com)
+        for ip, port, proto, s in WEBSITES:
+            if s == domain or s.endswith("." + domain) or domain.endswith("." + s):
+                dst_ip = ip
+                break
+        
+        src_port = random.randint(49152, 65535)
+        ts = time.time()
+        
+        # SYN packet
+        syn_pkt = make_packet(client, dst_ip, src_port, 443, 6, 0x02, b'', 1)
+        process_one_packet(syn_pkt, ts)
+        
+        # TLS ClientHello packet with the blocked domain as SNI
+        hello_pkt = make_packet(client, dst_ip, src_port, 443, 6, 0x18, make_tls_hello(domain), 2)
+        process_one_packet(hello_pkt, ts + 0.01)
+        
+        update_live_report()
+    return {"status": "ok", "blocked": domain}
+
+@app.post("/api/rules/unblock")
+def post_unblock(req: BlockRequest):
+    with state_lock:
+        rules_engine.remove_domain_block(req.domain)
+        # Unblock active and expired flows
+        rule_id = f"BLOCK_{req.domain.upper().replace('.', '_')}"
+        for flow in list(tracker.flows.values()) + list(tracker.expired_flows.values()):
+            matches_sni = (flow.sni == req.domain or (hasattr(flow, 'sni') and flow.sni and flow.sni.endswith(req.domain)))
+            matches_rule = (hasattr(flow, 'matched_rule') and flow.matched_rule and flow.matched_rule.rule_id == rule_id)
+            
+            if flow.state == "BLOCKED" and (matches_sni or matches_rule):
+                # Revert status to EXPIRED if in expired archive, otherwise ACTIVE
+                if flow in tracker.expired_flows.values():
+                    flow.state = "EXPIRED"
+                else:
+                    flow.state = "ACTIVE"
+                flow.matched_rule = None
+        update_live_report()
+    return {"status": "ok", "unblocked": req.domain}
+
+import subprocess
+import socket
+
+def is_host_live(host: str) -> bool:
+    # 1. Try system ping (fast, 1 packet, 1 second timeout)
+    try:
+        res = subprocess.run(
+            ["ping", "-n", "1", "-w", "1000", host],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=1.5
+        )
+        if res.returncode == 0:
+            return True
+    except Exception:
+        pass
+
+    # 2. Fallback: Try TCP socket connection to common ports
+    try:
+        ip = socket.gethostbyname(host)
+        for port in [80, 443, 22, 53]:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(1.0)
+                s.connect((ip, port))
+                s.close()
+                return True
+            except Exception:
+                pass
+    except Exception:
+        pass
+        
+    return False
+
+@app.post("/api/ping")
+def post_ping(req: PingRequest):
+    host = req.host.strip()
+    is_live = is_host_live(host)
+    status_str = "LIVE" if is_live else "DOWN"
+    
+    # Try to resolve IP to display in the packet flow
+    try:
+        target_ip = socket.gethostbyname(host)
+    except Exception:
+        target_ip = "172.217.16.142" # Fallback mock IP
+        
+    with state_lock:
+        ts = time.time()
+        client_ip = random.choice(CLIENT_IPS)
+            
+        # Simulate 4 ICMP Ping Echo Requests
+        for i in range(4):
+            # Request
+            ping_req = make_packet(client_ip, target_ip, 0, 0, 1, 0, f"Ping Request {i+1}".encode('utf-8'), i+1)
+            process_one_packet(ping_req, ts + i * 0.2)
+            
+            # Reply is only generated if target is LIVE
+            if is_live:
+                ping_reply = make_packet(target_ip, client_ip, 0, 0, 1, 0, f"Ping Reply {i+1}".encode('utf-8'), i+1)
+                process_one_packet(ping_reply, ts + i * 0.2 + 0.05)
+            
+        update_live_report()
+        
+    return {
+        "status": "ping success", 
+        "host": host, 
+        "target_ip": target_ip, 
+        "is_live": is_live, 
+        "host_status": status_str
+    }
+
 
 @app.on_event("startup")
 def startup_event():

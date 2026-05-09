@@ -84,6 +84,8 @@ class FlowTracker:
             protocol_name = "TCP"
         elif protocol == 17:
             protocol_name = "UDP"
+        elif protocol == 1:
+            protocol_name = "ICMP"
         else:
             protocol_name = f"Proto-{protocol}"
 
@@ -109,32 +111,50 @@ class FlowTracker:
                 logger.info(f"Flow state transition: {canonical_key[0]}:{canonical_key[1]} <-> {canonical_key[2]}:{canonical_key[3]} state={flow.state}")
 
         # Application Classification (SNI/Host Extraction and L7 Decoders)
-        if not flow.app_name and payload:
-            try:
-                # For TCP, check HTTPS and HTTP first
-                if protocol == 6:
-                    hostname = TLSParser.extract_sni(payload)
-                    if hostname:
-                        flow.sni = hostname
-                        flow.app_name = "HTTPS"
-                        logger.info(f"Flow classified: {canonical_key[0]}:{canonical_key[1]} <-> {canonical_key[2]}:{canonical_key[3]} | App=HTTPS | SNI={hostname}")
-                    else:
-                        host = HTTPParser.extract_host(payload)
-                        if host:
-                            flow.sni = host
-                            flow.app_name = "HTTP"
-                            logger.info(f"Flow classified: {canonical_key[0]}:{canonical_key[1]} <-> {canonical_key[2]}:{canonical_key[3]} | App=HTTP | Host={host}")
-                
-                # If still not classified, check other L7 decoders (SSH, DNS, FTP)
-                if not flow.app_name:
-                    l7_app = L7Decoders.classify_payload(payload, protocol)
-                    if l7_app:
-                        flow.app_name = l7_app
-                        logger.info(f"Flow classified: {canonical_key[0]}:{canonical_key[1]} <-> {canonical_key[2]}:{canonical_key[3]} | App={l7_app}")
-            except Exception as e:
-                logger.warning(f"Error classifying application payload: {str(e)}")
+        if not flow.app_name or (payload and flow.app_name in ["HTTP", "HTTPS"] and not flow.sni):
+            if protocol == 1:
+                flow.app_name = "Ping"
+            elif payload:
+                try:
+                    # For TCP, check HTTPS and HTTP first
+                    if protocol == 6:
+                        hostname = TLSParser.extract_sni(payload)
+                        if hostname:
+                            flow.sni = hostname
+                            flow.app_name = "HTTPS"
+                            logger.info(f"Flow classified: {canonical_key[0]}:{canonical_key[1]} <-> {canonical_key[2]}:{canonical_key[3]} | App=HTTPS | SNI={hostname}")
+                        else:
+                            host = HTTPParser.extract_host(payload)
+                            if host:
+                                flow.sni = host
+                                flow.app_name = "HTTP"
+                                logger.info(f"Flow classified: {canonical_key[0]}:{canonical_key[1]} <-> {canonical_key[2]}:{canonical_key[3]} | App=HTTP | Host={host}")
+                    
+                    # If still not classified, check other L7 decoders (SSH, DNS, FTP)
+                    if not flow.app_name:
+                        l7_app = L7Decoders.classify_payload(payload, protocol)
+                        if l7_app:
+                            flow.app_name = l7_app
+                            logger.info(f"Flow classified: {canonical_key[0]}:{canonical_key[1]} <-> {canonical_key[2]}:{canonical_key[3]} | App={l7_app}")
+                except Exception as e:
+                    logger.warning(f"Error classifying application payload: {str(e)}")
+
+            # Fallback to port-based classification if deep packet inspection has no results yet
+            if not flow.app_name:
+                ports = [src_port, dst_port]
+                if 53 in ports:
+                    flow.app_name = "DNS"
+                elif 443 in ports:
+                    flow.app_name = "HTTPS"
+                elif 80 in ports:
+                    flow.app_name = "HTTP"
+                elif 22 in ports:
+                    flow.app_name = "SSH"
+                elif 21 in ports:
+                    flow.app_name = "FTP"
 
         return flow
+
 
     def cleanup_expired_flows(self, current_time, idle_timeout=30.0, closed_timeout=5.0):
         """
@@ -146,8 +166,13 @@ class FlowTracker:
                 if current_time - flow.last_active > closed_timeout:
                     expired_keys.append(key)
                     logger.info(f"Flow expired (TCP closed timeout): {key[0]}:{key[1]} <-> {key[2]}:{key[3]}")
+            elif flow.state == "BLOCKED":
+                if current_time - flow.last_active > idle_timeout:
+                    expired_keys.append(key)
+                    logger.info(f"Blocked flow archived: {key[0]}:{key[1]} <-> {key[2]}:{key[3]}")
             elif current_time - flow.last_active > idle_timeout:
                 expired_keys.append(key)
+                flow.state = "EXPIRED"
                 logger.info(f"Flow expired (idle timeout): {key[0]}:{key[1]} <-> {key[2]}:{key[3]}")
 
         for key in expired_keys:

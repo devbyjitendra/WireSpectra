@@ -6,7 +6,7 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Install system dependencies if any are needed (e.g. gcc, but our pure python doesn't strictly need them)
+# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
@@ -15,8 +15,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy source code
+# Copy source, scripts, and tests for portfolio completeness
 COPY src/ ./src/
+COPY scripts/ ./scripts/
+COPY tests/ ./tests/
 
 # Expose port
 EXPOSE 8080

@@ -32,6 +32,12 @@ const DownloadIcon = () => (
 const RefreshIcon = () => (
   <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
 );
+const KeyIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+);
+const TerminalIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+);
 
 // ── App badge color by application name ───────────────────────────────────
 const APP_BADGE_COLORS = {
@@ -40,6 +46,7 @@ const APP_BADGE_COLORS = {
   DNS:          { color: '#a78bfa', bg: 'rgba(167,139,250,0.10)', border: 'rgba(167,139,250,0.25)' },
   SSH:          { color: '#34d399', bg: 'rgba(52,211,153,0.10)',  border: 'rgba(52,211,153,0.25)' },
   FTP:          { color: '#fbbf24', bg: 'rgba(251,191,36,0.10)',  border: 'rgba(251,191,36,0.25)' },
+  Ping:         { color: '#f43f5e', bg: 'rgba(244,63,94,0.10)',   border: 'rgba(244,63,94,0.25)' },
   Unclassified: { color: '#64748b', bg: 'rgba(100,116,139,0.08)', border: 'rgba(100,116,139,0.2)' },
 };
 
@@ -54,6 +61,7 @@ const APP_BAR_COLORS = {
   DNS:   'linear-gradient(90deg,#a78bfa,#c084fc)',
   SSH:   'linear-gradient(90deg,#34d399,#10b981)',
   FTP:   'linear-gradient(90deg,#fbbf24,#fb923c)',
+  Ping:  'linear-gradient(90deg,#f43f5e,#fda4af)',
 };
 function getAppBarColor(name) {
   return APP_BAR_COLORS[name] || 'linear-gradient(90deg,#475569,#64748b)';
@@ -95,6 +103,7 @@ const MOCK_DATA = {
 
 // Determine API Endpoint
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080';
+const itemsPerPage = 12;
 
 // ── Main App ───────────────────────────────────────────────────────────────
 function App() {
@@ -107,9 +116,108 @@ function App() {
   const [currentPage, setCurrentPage] = useState(1);
   const [uploadError, setUploadError] = useState('');
   const [apiConnectionStatus, setApiConnectionStatus] = useState('DISCONNECTED'); // 'DISCONNECTED', 'CONNECTING', 'CONNECTED', 'ERROR'
-  const itemsPerPage = 10;
   
+  // Real-time block & ping states
+  const [blockedDomains, setBlockedDomains] = useState([]);
+  const [blockInput, setBlockInput] = useState('');
+  const [pingInput, setPingInput] = useState('');
+  const [pingStatus, setPingStatus] = useState('');
+  const [pingResult, setPingResult] = useState(null);
+
   const pollingRef = useRef(null);
+
+  // ── Fetch Rules List ──────────────────────────────────────────────────────
+  const fetchBlockedRules = async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/rules`);
+      if (res.ok) {
+        const rulesData = await res.json();
+        setBlockedDomains(rulesData.blocked_domains || []);
+      }
+    } catch (err) {
+      console.error('Failed to fetch firewall rules:', err);
+    }
+  };
+
+  // ── Fetch Report (Component level scope) ──────────────────────────────────
+  const fetchReport = async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/report`);
+      if (!res.ok) throw new Error('API server returned error code');
+      const parsed = await res.json();
+      setData(parsed);
+      setApiConnectionStatus('CONNECTED');
+      fetchBlockedRules(); // Sync active blocklist rules with backend
+    } catch (err) {
+      console.error('Failed to fetch live DPI data:', err);
+      setApiConnectionStatus('ERROR');
+      setUploadError(`Failed to sync with Back4App live backend API at ${API_URL}`);
+    }
+  };
+
+  // ── Block domain action ───────────────────────────────────────────────────
+  const handleBlockDomain = async (e) => {
+    e.preventDefault();
+    if (!blockInput.trim()) return;
+    try {
+      const res = await fetch(`${API_URL}/api/rules/block`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain: blockInput.trim() }),
+      });
+      if (res.ok) {
+        setBlockInput('');
+        fetchBlockedRules();
+        fetchReport(); // Update table instantly
+      }
+    } catch (err) {
+      console.error('Failed to block domain:', err);
+    }
+  };
+
+  // ── Unblock domain action ─────────────────────────────────────────────────
+  const handleUnblockDomain = async (domain) => {
+    try {
+      const res = await fetch(`${API_URL}/api/rules/unblock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain }),
+      });
+      if (res.ok) {
+        fetchBlockedRules();
+        fetchReport(); // Update table instantly
+      }
+    } catch (err) {
+      console.error('Failed to unblock domain:', err);
+    }
+  };
+
+  // ── Send Ping simulation ──────────────────────────────────────────────────
+  const handleSendPing = async (e) => {
+    e.preventDefault();
+    if (!pingInput.trim()) return;
+    setPingStatus('Pinging...');
+    setPingResult(null);
+    try {
+      const res = await fetch(`${API_URL}/api/ping`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host: pingInput.trim() }),
+      });
+      if (res.ok) {
+        const resData = await res.json();
+        setPingResult(resData);
+        setPingStatus('');
+        setPingInput('');
+        fetchReport(); // Update table instantly
+      } else {
+        setPingStatus('Failed to send ping.');
+      }
+    } catch (err) {
+      console.error('Failed to send ping request:', err);
+      setPingStatus('Connection error.');
+    }
+  };
 
   // ── Polling logic for Live Mode ──────────────────────────────────────────
   const startLivePolling = () => {
@@ -120,21 +228,8 @@ function App() {
     setApiConnectionStatus('CONNECTING');
     setUploadError('');
 
-    const fetchReport = async () => {
-      try {
-        const res = await fetch(`${API_URL}/api/report`);
-        if (!res.ok) throw new Error('API server returned error code');
-        const parsed = await res.json();
-        setData(parsed);
-        setApiConnectionStatus('CONNECTED');
-      } catch (err) {
-        console.error('Failed to fetch live DPI data:', err);
-        setApiConnectionStatus('ERROR');
-        setUploadError(`Failed to sync with Back4App live backend API at ${API_URL}`);
-      }
-    };
-
     fetchReport(); // Initial fetch
+    fetchBlockedRules(); // Fetch initial rules
     pollingRef.current = setInterval(fetchReport, 1500); // Poll every 1.5s
   };
 
@@ -148,24 +243,6 @@ function App() {
   useEffect(() => {
     return () => stopLivePolling();
   }, []);
-
-  // Reset live state on the backend
-  const handleResetLive = async () => {
-    try {
-      await fetch(`${API_URL}/api/reset`, { method: 'POST' });
-      // Clear local visual list temporarily
-      setData(prev => ({
-        ...prev,
-        summary: { total_packets: 0, total_bytes: 0, duration_sec: 0, avg_pps: 0, avg_kbps: 0 },
-        protocols: {},
-        applications: {},
-        alerts: [],
-        flows: []
-      }));
-    } catch (err) {
-      console.error('Failed to reset backend simulator:', err);
-    }
-  };
 
   // ── File upload ──────────────────────────────────────────────────────────
   const handleFileUpload = (e) => {
@@ -255,7 +332,7 @@ function App() {
             <div className="drop-zone-icon"><UploadIcon /></div>
             <h2 style={{ color: '#fff', marginBottom: '8px' }}>Real-time Live DPI Network Analyzer</h2>
             <p className="subtitle" style={{ maxWidth: '480px', textAlign: 'center', marginBottom: '24px' }}>
-              Connect to the live Python packet analyzer deployed on Back4App or browse a pre-compiled JSON diagnostics report.
+              Connect to the live Python packet analyzer deployed on AWS/Back4App or browse a pre-compiled JSON diagnostics report.
             </p>
 
             <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', justifyContent: 'center', marginBottom: '16px' }}>
@@ -284,7 +361,7 @@ function App() {
                 <span className="step-num">1</span>
                 <div>
                   <strong>Start API Stream</strong>
-                  <p className="subtitle">Run <code>python src/server.py</code> locally or on Back4App</p>
+                  <p className="subtitle">Run <code>python src/server.py</code> locally or on AWS</p>
                 </div>
               </div>
               <div className="step-card">
@@ -350,23 +427,21 @@ function App() {
           )}
 
           {mode === 'LIVE' && (
-            <>
-              <button className="btn btn-outline" style={{ borderColor: 'var(--danger-border)', color: 'var(--danger)' }} onClick={handleResetLive}>
-                <RefreshIcon /> Reset Stream
-              </button>
-              <a href={`${API_URL}/api/pcap`} download className="btn btn-outline" style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                <DownloadIcon /> Download PCAP
-              </a>
-            </>
+            <a href={`${API_URL}/api/pcap`} download className="btn btn-outline" style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+              <DownloadIcon /> Download PCAP
+            </a>
           )}
 
-          <button className="btn btn-outline" onClick={startLivePolling}>
-            <RadioIcon /> Live Feed
-          </button>
-          
-          <button className="btn btn-outline" onClick={loadSimulation}>
-            <PlayIcon /> Demo Data
-          </button>
+          {mode !== 'LIVE' && (
+            <>
+              <button className="btn btn-outline" onClick={startLivePolling}>
+                <RadioIcon /> Live Feed
+              </button>
+              <button className="btn btn-outline" onClick={loadSimulation}>
+                <PlayIcon /> Demo Data
+              </button>
+            </>
+          )}
 
           <div className="file-input-wrapper">
             <button className="btn btn-primary">
@@ -427,6 +502,101 @@ function App() {
           </p>
         </div>
       </section>
+
+      {/* Dynamic Controls Grid (Active in LIVE Mode) */}
+      {mode === 'LIVE' && (
+        <section className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', marginTop: '0px' }}>
+          {/* Firewall Rules Panel */}
+          <div className="glass-card" style={{ padding: '20px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+              <KeyIcon />
+              <h2 style={{ fontSize: '1.1rem', margin: 0 }}>Firewall Rules (Policy Control)</h2>
+            </div>
+            <p className="subtitle" style={{ marginBottom: '16px' }}>Block domains in real-time. Blocked sites display as BLOCKED.</p>
+            <form onSubmit={handleBlockDomain} style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
+              <input
+                type="text"
+                className="search-input"
+                style={{ flex: 1, minWidth: 'auto', padding: '8px 12px' }}
+                placeholder="e.g. youtube.com, facebook.com"
+                value={blockInput}
+                onChange={e => setBlockInput(e.target.value)}
+              />
+              <button className="btn btn-primary" type="submit" style={{ padding: '8px 16px' }}>Block</button>
+            </form>
+            <div className="blocked-list" style={{ maxHeight: '100px', overflowY: 'auto' }}>
+              {blockedDomains.length === 0 ? (
+                <span className="subtitle" style={{ fontStyle: 'italic' }}>No active block rules</span>
+              ) : (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                  {blockedDomains.map(domain => (
+                    <span key={domain} className="badge badge-status-blocked" style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '4px 10px' }}>
+                      {domain}
+                      <span style={{ cursor: 'pointer', fontWeight: 'bold', fontSize: '0.8rem', color: '#f43f5e' }} onClick={() => handleUnblockDomain(domain)}>×</span>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Ping Simulator Diagnostics Panel */}
+          <div className="glass-card" style={{ padding: '20px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+              <TerminalIcon />
+              <h2 style={{ fontSize: '1.1rem', margin: 0 }}>DPI Diagnostics (Ping Simulator)</h2>
+            </div>
+            <p className="subtitle" style={{ marginBottom: '16px' }}>Simulate a ping query (ICMP) from client to check packet routing.</p>
+            <form onSubmit={handleSendPing} style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
+              <input
+                type="text"
+                className="search-input"
+                style={{ flex: 1, minWidth: 'auto', padding: '8px 12px' }}
+                placeholder="e.g. 8.8.8.8, myhost.lan"
+                value={pingInput}
+                onChange={e => setPingInput(e.target.value)}
+              />
+              <button className="btn btn-primary" type="submit" style={{ padding: '8px 16px', background: 'var(--secondary)' }}>Ping</button>
+            </form>
+            {pingStatus && (
+              <p className="subtitle" style={{ color: 'var(--warning)', fontSize: '0.82rem', margin: 0 }}>
+                {pingStatus}
+              </p>
+            )}
+            {pingResult && (
+              <div style={{ 
+                marginTop: '12px', 
+                padding: '10px 12px', 
+                borderRadius: '6px', 
+                background: 'rgba(255, 255, 255, 0.02)',
+                border: '1px solid rgba(255, 255, 255, 0.06)',
+                fontSize: '0.85rem'
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span>Host: <strong style={{ color: '#fff' }}>{pingResult.host}</strong> ({pingResult.target_ip})</span>
+                  <span style={{ 
+                    fontWeight: 700, 
+                    color: pingResult.is_live ? '#10b981' : '#ef4444',
+                    background: pingResult.is_live ? 'rgba(16, 185, 129, 0.1)' : 'rgba(239, 68, 68, 0.1)',
+                    padding: '2px 8px',
+                    borderRadius: '4px',
+                    fontSize: '0.75rem',
+                    letterSpacing: '0.03em',
+                    boxShadow: pingResult.is_live ? '0 0 8px rgba(16, 185, 129, 0.2)' : '0 0 8px rgba(239, 68, 68, 0.2)'
+                  }}>
+                    {pingResult.is_live ? '● ONLINE' : '● OFFLINE'}
+                  </span>
+                </div>
+                <p className="subtitle" style={{ margin: '6px 0 0 0', fontSize: '0.75rem' }}>
+                  {pingResult.is_live 
+                    ? 'ICMP Request & Reply packets injected successfully.' 
+                    : 'ICMP Requests sent, but target did not respond (100% packet loss).'}
+                </p>
+              </div>
+            )}
+          </div>
+        </section>
+      )}
 
       {/* Distributions + Alerts */}
       <main className="main-grid">
@@ -570,26 +740,54 @@ function App() {
 
           {/* Flow status summary */}
           <div className="flow-status-summary">
-            <h3 style={{ marginBottom: '12px' }}>Flow Status Breakdown</h3>
+            <h3 style={{ marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span className="pulse-indicator" style={{ background: '#38bdf8', width: '6px', height: '6px' }}></span>
+              Flow Status Telemetry
+            </h3>
             {['ACTIVE', 'CLOSED', 'BLOCKED', 'EXPIRED'].map(status => {
               const count = flows.filter(f => f.status === status).length;
               const pct = flows.length ? (count / flows.length) * 100 : 0;
-              const colors = {
-                ACTIVE:  'var(--success)',
-                CLOSED:  'var(--text-muted)',
-                BLOCKED: 'var(--danger)',
-                EXPIRED: 'var(--warning)',
+              
+              const gradients = {
+                ACTIVE:  'linear-gradient(90deg, #10b981, #059669)',
+                CLOSED:  'linear-gradient(90deg, #64748b, #475569)',
+                BLOCKED: 'linear-gradient(90deg, #ef4444, #b91c1c)',
+                EXPIRED: 'linear-gradient(90deg, #f59e0b, #d97706)',
               };
+              
+              const statusColors = {
+                ACTIVE:  '#10b981',
+                CLOSED:  '#94a3b8',
+                BLOCKED: '#f43f5e',
+                EXPIRED: '#fbbf24',
+              };
+
+              const dotColors = {
+                ACTIVE:  '#10b981',
+                CLOSED:  '#64748b',
+                BLOCKED: '#ef4444',
+                EXPIRED: '#f59e0b',
+              };
+              
               return (
-                <div key={status} style={{ marginBottom: '10px' }}>
-                  <div className="dist-item">
-                    <span style={{ fontSize: '0.8rem', color: colors[status], fontWeight: 600 }}>{status}</span>
-                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8rem' }}>{count} flows</span>
+                <div key={status} style={{ marginBottom: '12px' }}>
+                  <div className="dist-item" style={{ marginBottom: '4px' }}>
+                    <span style={{ fontSize: '0.85rem', color: statusColors[status], fontWeight: 700, display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: dotColors[status], display: 'inline-block', boxShadow: `0 0 8px ${dotColors[status]}` }}></span>
+                      {status}
+                    </span>
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8rem', color: '#f3f4f6' }}>
+                      <strong>{count}</strong> flows <span style={{ color: 'var(--text-muted)', marginLeft: '4px' }}>({pct.toFixed(1)}%)</span>
+                    </span>
                   </div>
-                  <div className="progress-bar-bg">
+                  <div className="progress-bar-bg" style={{ height: '6px', background: 'rgba(255, 255, 255, 0.03)' }}>
                     <div
                       className="progress-bar-fill"
-                      style={{ width: `${pct}%`, background: colors[status] }}
+                      style={{ 
+                        width: `${pct}%`, 
+                        background: gradients[status],
+                        boxShadow: pct > 0 ? `0 0 8px ${dotColors[status]}40` : 'none'
+                      }}
                     />
                   </div>
                 </div>
@@ -628,6 +826,7 @@ function App() {
               <option value="ALL">All Protocols</option>
               <option value="TCP">TCP</option>
               <option value="UDP">UDP</option>
+              <option value="ICMP">ICMP</option>
             </select>
             <select
               className="filter-select"

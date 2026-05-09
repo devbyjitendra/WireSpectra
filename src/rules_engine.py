@@ -154,7 +154,8 @@ class Rule:
             suffix = rule_dom[2:]
             return test_dom == suffix or test_dom.endswith("." + suffix)
 
-        return test_dom == rule_dom
+        # Match exact domain or any of its subdomains (e.g. google.com matches www.google.com)
+        return test_dom == rule_dom or test_dom.endswith("." + rule_dom)
 
 
 class RulesEngine:
@@ -250,3 +251,20 @@ class RulesEngine:
             domain=flow.sni,
             payload=payload
         )
+
+    def add_domain_block(self, domain: str):
+        rule_id = f"BLOCK_{domain.upper().replace('.', '_')}"
+        # Prevent duplicates
+        if any(r.rule_id == rule_id for r in self.rules):
+            return
+        rule = Rule(
+            rule_id=rule_id,
+            action="BLOCK",
+            domain=domain
+        )
+        self.rules.append(rule)
+
+    def remove_domain_block(self, domain: str):
+        rule_id = f"BLOCK_{domain.upper().replace('.', '_')}"
+        self.rules = [r for r in self.rules if r.rule_id != rule_id]
+
