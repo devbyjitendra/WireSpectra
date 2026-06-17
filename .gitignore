@@ -13,3 +13,9 @@ DEVELOPMENT_LOG.md
 # Frontend
 frontend/node_modules/
 frontend/dist/
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+!.env.example
